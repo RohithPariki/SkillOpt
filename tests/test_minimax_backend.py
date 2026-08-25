@@ -169,3 +169,72 @@ def test_unknown_deployment_defaults_to_adaptive(
     minimax_backend.chat_target("system", "user", retries=1)
 
     assert recorder.calls[0]["payload"]["thinking"] == {"type": "adaptive"}
+
+
+def test_optimizer_deployment_and_timeout_forwarding(
+    monkeypatch: pytest.MonkeyPatch, minimax_backend: Any
+) -> None:
+    minimax_backend.set_optimizer_deployment("MiniMax-Optimizer-Custom")
+    minimax_backend.set_target_deployment("MiniMax-Target-Custom")
+    recorder = _record_urlopen(monkeypatch, minimax_backend)
+
+    # chat_optimizer uses optimizer deployment
+    minimax_backend.chat_optimizer("sys_opt", "user_opt", retries=1, timeout=45.0)
+    assert recorder.calls[0]["payload"]["model"] == "MiniMax-Optimizer-Custom"
+    assert recorder.calls[0]["timeout"] == 45.0
+
+    # chat_target uses target deployment
+    minimax_backend.chat_target("sys_tgt", "user_tgt", retries=1, timeout=60.0)
+    assert recorder.calls[1]["payload"]["model"] == "MiniMax-Target-Custom"
+    assert recorder.calls[1]["timeout"] == 60.0
+
+
+def test_chat_optimizer_messages_dispatches_with_tools(
+    monkeypatch: pytest.MonkeyPatch, minimax_backend: Any
+) -> None:
+    minimax_backend.set_optimizer_deployment("MiniMax-Opt-Tools")
+    recorder = _record_urlopen(monkeypatch, minimax_backend)
+
+    messages = [{"role": "user", "content": "analyze"}]
+    tools = [{"type": "function", "function": {"name": "test_tool"}}]
+
+    minimax_backend.chat_optimizer_messages(
+        messages=messages,
+        retries=1,
+        tools=tools,
+        tool_choice="auto",
+        timeout=30.0,
+    )
+
+    assert recorder.calls[0]["payload"]["model"] == "MiniMax-Opt-Tools"
+    assert recorder.calls[0]["payload"]["tools"] == tools
+    assert recorder.calls[0]["payload"]["tool_choice"] == "auto"
+    assert recorder.calls[0]["timeout"] == 30.0
+
+
+def test_model_module_level_minimax_setters_and_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    import skillopt.model as model
+    from skillopt.model import minimax_backend as backend
+
+    recorder = _record_urlopen(monkeypatch, backend)
+
+    model.set_target_backend("minimax_chat")
+    model.set_optimizer_backend("minimax_chat")
+    model.set_target_deployment("MiniMax-Global-Target")
+    model.set_optimizer_deployment("MiniMax-Global-Optimizer")
+
+    assert backend.TARGET_DEPLOYMENT == "MiniMax-Global-Target"
+    assert backend.OPTIMIZER_DEPLOYMENT == "MiniMax-Global-Optimizer"
+
+    model.chat_target("sys", "user", retries=1, timeout=99.0)
+    assert recorder.calls[0]["payload"]["model"] == "MiniMax-Global-Target"
+    assert recorder.calls[0]["timeout"] == 99.0
+
+    model.chat_optimizer_messages(
+        messages=[{"role": "user", "content": "hi"}],
+        retries=1,
+        timeout=12.0,
+    )
+    assert recorder.calls[1]["payload"]["model"] == "MiniMax-Global-Optimizer"
+    assert recorder.calls[1]["timeout"] == 12.0
+
