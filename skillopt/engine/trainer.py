@@ -67,6 +67,7 @@ from skillopt.model import (
     configure_copilot_exec,
     configure_cursor_exec,
     configure_minimax_chat,
+    configure_openai_compatible,
     configure_qwen_chat,
     get_qwen_thinking_modes,
     get_token_summary,
@@ -832,6 +833,26 @@ class ReflACTTrainer:
         minimax_model_cfg = cfg.get("minimax_model")
         if minimax_model_cfg and cfg.get("target_backend") == "minimax_chat":
             set_target_deployment(str(minimax_model_cfg))
+        configure_openai_compatible(
+            base_url=cfg.get("openai_compatible_base_url") or None,
+            api_key=cfg.get("openai_compatible_api_key") or None,
+            model=cfg.get("openai_compatible_model") or None,
+            temperature=cfg.get("openai_compatible_temperature"),
+            timeout_seconds=cfg.get("openai_compatible_timeout_seconds"),
+            max_tokens=cfg.get("openai_compatible_max_tokens"),
+            optimizer_base_url=cfg.get("optimizer_openai_compatible_base_url") or None,
+            optimizer_api_key=cfg.get("optimizer_openai_compatible_api_key") or None,
+            optimizer_model=cfg.get("optimizer_openai_compatible_model") or None,
+            optimizer_temperature=cfg.get("optimizer_openai_compatible_temperature"),
+            optimizer_timeout_seconds=cfg.get("optimizer_openai_compatible_timeout_seconds"),
+            optimizer_max_tokens=cfg.get("optimizer_openai_compatible_max_tokens"),
+            target_base_url=cfg.get("target_openai_compatible_base_url") or None,
+            target_api_key=cfg.get("target_openai_compatible_api_key") or None,
+            target_model=cfg.get("target_openai_compatible_model") or None,
+            target_temperature=cfg.get("target_openai_compatible_temperature"),
+            target_timeout_seconds=cfg.get("target_openai_compatible_timeout_seconds"),
+            target_max_tokens=cfg.get("target_openai_compatible_max_tokens"),
+        )
         _configure_trace_to_optimizer_gates(target_backend, cfg)
         reasoning = cfg.get("reasoning_effort", "") or None
         set_reasoning_effort(reasoning)
