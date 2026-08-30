@@ -493,6 +493,9 @@ def load_config(args: argparse.Namespace) -> dict:
         elif backend == "copilot_exec":
             _set_role("optimizer_backend", "openai_chat")
             _set_role("target_backend", "copilot_exec")
+        elif backend == "qwen_chat":
+            _set_role("optimizer_backend", "openai_chat")
+            _set_role("target_backend", "qwen_chat")
         elif backend == "minimax_chat":
             _set_role("optimizer_backend", "openai_chat")
             _set_role("target_backend", "minimax_chat")
@@ -518,6 +521,22 @@ def load_config(args: argparse.Namespace) -> dict:
             and not _has_model_override("model.optimizer", "optimizer_model")
         ):
             cfg["optimizer_model"] = default_model_for_backend("claude_code_exec")
+    if cfg.get("optimizer_backend") == "qwen_chat":
+        if (
+            str(cfg.get("optimizer_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS
+            and not _has_model_override("model.optimizer", "optimizer_model")
+        ):
+            cfg["optimizer_model"] = default_model_for_backend("qwen_chat")
+    if cfg.get("optimizer_backend") == "openai_compatible":
+        if (
+            str(cfg.get("optimizer_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS
+            and not _has_model_override("model.optimizer", "optimizer_model")
+        ):
+            cfg["optimizer_model"] = (
+                cfg.get("optimizer_openai_compatible_model")
+                or cfg.get("openai_compatible_model")
+                or default_model_for_backend("openai_compatible")
+            )
     if cfg.get("target_backend") == "claude_chat":
         if (
             str(cfg.get("target_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS
@@ -543,6 +562,12 @@ def load_config(args: argparse.Namespace) -> dict:
         ):
             # Copilot CLI model IDs are independent of Azure deployment names.
             cfg["target_model"] = ""
+    if cfg.get("target_backend") == "qwen_chat":
+        if (
+            str(cfg.get("target_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS
+            and not _has_model_override("model.target", "target_model")
+        ):
+            cfg["target_model"] = default_model_for_backend("qwen_chat")
     if cfg.get("target_backend") == "minimax_chat":
         if (
             str(cfg.get("target_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS
@@ -551,6 +576,16 @@ def load_config(args: argparse.Namespace) -> dict:
             cfg["target_model"] = (
                 cfg.get("minimax_model")
                 or default_model_for_backend("minimax_chat")
+            )
+    if cfg.get("target_backend") == "openai_compatible":
+        if (
+            str(cfg.get("target_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS
+            and not _has_model_override("model.target", "target_model")
+        ):
+            cfg["target_model"] = (
+                cfg.get("target_openai_compatible_model")
+                or cfg.get("openai_compatible_model")
+                or default_model_for_backend("openai_compatible")
             )
 
     if not cfg.get("out_root"):
@@ -636,6 +671,13 @@ def main() -> None:
         max_tokens=cfg.get("qwen_chat_max_tokens"),
         enable_thinking=cfg.get("qwen_chat_enable_thinking"),
         thinking_mode=cfg.get("qwen_chat_thinking_mode"),
+        optimizer_base_url=cfg.get("optimizer_qwen_chat_base_url") or None,
+        optimizer_api_key=cfg.get("optimizer_qwen_chat_api_key") or None,
+        optimizer_temperature=cfg.get("optimizer_qwen_chat_temperature"),
+        optimizer_timeout_seconds=cfg.get("optimizer_qwen_chat_timeout_seconds"),
+        optimizer_max_tokens=cfg.get("optimizer_qwen_chat_max_tokens"),
+        optimizer_enable_thinking=cfg.get("optimizer_qwen_chat_enable_thinking"),
+        optimizer_thinking_mode=cfg.get("optimizer_qwen_chat_thinking_mode"),
         target_base_url=cfg.get("target_qwen_chat_base_url") or None,
         target_api_key=cfg.get("target_qwen_chat_api_key") or None,
         target_temperature=cfg.get("target_qwen_chat_temperature"),

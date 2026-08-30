@@ -246,3 +246,215 @@ def test_trainer_initialization_configures_openai_compatible(monkeypatch: pytest
     assert configured_kwargs["timeout_seconds"] == 120.0
     assert configured_kwargs["max_tokens"] == 4096
 
+
+def test_train_script_backend_choices_accepts_openai_compatible() -> None:
+    raw = {
+        "model": {"backend": "azure_openai", "optimizer": "gpt-5.5", "target": "gpt-5.5"},
+        "env": {"name": "searchqa"},
+    }
+    with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+        yaml.dump(raw, f)
+        config_path = f.name
+
+    cli_args = [
+        "--config", config_path,
+        "--backend", "openai_compatible",
+    ]
+    with mock.patch("sys.argv", ["train.py"] + cli_args):
+        args = train_script.parse_args()
+        flat = train_script.load_config(args)
+
+    assert args.backend == "openai_compatible"
+    assert flat["optimizer_backend"] == "openai_compatible"
+    assert flat["target_backend"] == "openai_compatible"
+    assert flat["optimizer_model"] == "gpt-4o-mini"
+    assert flat["target_model"] == "gpt-4o-mini"
+
+
+def test_train_script_openai_compatible_model_precedence() -> None:
+    raw = {
+        "model": {"backend": "azure_openai", "optimizer": "gpt-5.5", "target": "gpt-5.5"},
+        "env": {"name": "searchqa"},
+    }
+    with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+        yaml.dump(raw, f)
+        config_path = f.name
+
+    # 1. Shared model override
+    with mock.patch("sys.argv", [
+        "train.py",
+        "--config", config_path,
+        "--backend", "openai_compatible",
+        "--openai_compatible_model", "deepseek-chat",
+    ]):
+        flat = train_script.load_config(train_script.parse_args())
+        assert flat["optimizer_model"] == "deepseek-chat"
+        assert flat["target_model"] == "deepseek-chat"
+
+    # 2. Per-role compatible model overrides
+    with mock.patch("sys.argv", [
+        "train.py",
+        "--config", config_path,
+        "--backend", "openai_compatible",
+        "--openai_compatible_model", "fallback-shared",
+        "--optimizer_openai_compatible_model", "deepseek-coder",
+        "--target_openai_compatible_model", "deepseek-v3",
+    ]):
+        flat = train_script.load_config(train_script.parse_args())
+        assert flat["optimizer_model"] == "deepseek-coder"
+        assert flat["target_model"] == "deepseek-v3"
+
+    # 3. Explicit per-role model overrides take highest precedence
+    with mock.patch("sys.argv", [
+        "train.py",
+        "--config", config_path,
+        "--backend", "openai_compatible",
+        "--openai_compatible_model", "fallback-shared",
+        "--optimizer_model", "explicit-opt-model",
+        "--target_model", "explicit-tgt-model",
+    ]):
+        flat = train_script.load_config(train_script.parse_args())
+        assert flat["optimizer_model"] == "explicit-opt-model"
+        assert flat["target_model"] == "explicit-tgt-model"
+
+
+@pytest.mark.parametrize("backend_flag", ["qwen", "qwen_chat"])
+def test_eval_only_qwen_role_and_model_resolution(backend_flag: str) -> None:
+    raw = {
+        "model": {"backend": "azure_openai", "optimizer": "gpt-5.5", "target": "gpt-5.5"},
+        "env": {"name": "searchqa"},
+    }
+    with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+        yaml.dump(raw, f)
+        config_path = f.name
+
+    cli_args = [
+        "--config", config_path,
+        "--skill", "skills/test.md",
+        "--backend", backend_flag,
+    ]
+    with mock.patch("sys.argv", ["eval_only.py"] + cli_args):
+        args = eval_only_script.parse_args()
+        cfg = eval_only_script.load_config(args)
+
+    assert cfg["optimizer_backend"] == "openai_chat"
+    assert cfg["target_backend"] == "qwen_chat"
+    assert cfg["optimizer_model"] == "gpt-5.5"  # openai_chat keeps base sentinel or default
+    assert cfg["target_model"] == "Qwen/Qwen3.5-4B"  # normalized from gpt-5.5 sentinel
+
+
+def test_eval_only_openai_compatible_model_precedence() -> None:
+    raw = {
+        "model": {"backend": "azure_openai", "optimizer": "gpt-5.5", "target": "gpt-5.5"},
+        "env": {"name": "searchqa"},
+    }
+    with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+        yaml.dump(raw, f)
+        config_path = f.name
+
+    # 1. Default fallback
+    with mock.patch("sys.argv", [
+        "eval_only.py",
+        "--config", config_path,
+        "--skill", "skills/test.md",
+        "--backend", "openai_compatible",
+    ]):
+        cfg = eval_only_script.load_config(eval_only_script.parse_args())
+        assert cfg["optimizer_model"] == "gpt-4o-mini"
+        assert cfg["target_model"] == "gpt-4o-mini"
+
+    # 2. Shared model override
+    with mock.patch("sys.argv", [
+        "eval_only.py",
+        "--config", config_path,
+        "--skill", "skills/test.md",
+        "--backend", "openai_compatible",
+        "--openai_compatible_model", "deepseek-chat",
+    ]):
+        cfg = eval_only_script.load_config(eval_only_script.parse_args())
+        assert cfg["optimizer_model"] == "deepseek-chat"
+        assert cfg["target_model"] == "deepseek-chat"
+
+    # 3. Per-role compatible model overrides
+    with mock.patch("sys.argv", [
+        "eval_only.py",
+        "--config", config_path,
+        "--skill", "skills/test.md",
+        "--backend", "openai_compatible",
+        "--optimizer_openai_compatible_model", "opt-compat-model",
+        "--target_openai_compatible_model", "tgt-compat-model",
+    ]):
+        cfg = eval_only_script.load_config(eval_only_script.parse_args())
+        assert cfg["optimizer_model"] == "opt-compat-model"
+        assert cfg["target_model"] == "tgt-compat-model"
+
+    # 4. Explicit per-role overrides take precedence
+    with mock.patch("sys.argv", [
+        "eval_only.py",
+        "--config", config_path,
+        "--skill", "skills/test.md",
+        "--backend", "openai_compatible",
+        "--openai_compatible_model", "fallback-model",
+        "--optimizer_model", "explicit-opt",
+        "--target_model", "explicit-tgt",
+    ]):
+        cfg = eval_only_script.load_config(eval_only_script.parse_args())
+        assert cfg["optimizer_model"] == "explicit-opt"
+        assert cfg["target_model"] == "explicit-tgt"
+
+
+def test_eval_only_forwards_optimizer_qwen_chat_kwargs(monkeypatch: pytest.MonkeyPatch) -> None:
+    raw = {
+        "model": {"backend": "qwen_chat"},
+        "env": {"name": "searchqa"},
+    }
+    with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+        yaml.dump(raw, f)
+        config_path = f.name
+
+    with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+        f.write("# Dummy Skill\n")
+        skill_path = f.name
+
+    cli_args = [
+        "--config", config_path,
+        "--skill", skill_path,
+        "--optimizer_qwen_chat_base_url", "http://opt-qwen:8000/v1",
+        "--optimizer_qwen_chat_api_key", "opt-qwen-key",
+        "--optimizer_qwen_chat_temperature", "0.2",
+        "--optimizer_qwen_chat_timeout_seconds", "90",
+        "--optimizer_qwen_chat_max_tokens", "2048",
+        "--optimizer_qwen_chat_enable_thinking", "true",
+        "--optimizer_qwen_chat_thinking_mode", "deep",
+        "--target_qwen_chat_base_url", "http://tgt-qwen:8000/v1",
+    ]
+
+    qwen_kwargs: dict = {}
+
+    def fake_configure_qwen(**kwargs):
+        qwen_kwargs.update(kwargs)
+
+    monkeypatch.setattr(eval_only_script, "configure_qwen_chat", fake_configure_qwen)
+
+    class StopExecution(Exception):
+        pass
+
+    def stop_at_adapter(*args, **kwargs):
+        raise StopExecution()
+
+    monkeypatch.setattr(eval_only_script, "get_adapter", stop_at_adapter)
+
+    with mock.patch("sys.argv", ["eval_only.py"] + cli_args):
+        with pytest.raises(StopExecution):
+            eval_only_script.main()
+
+    assert qwen_kwargs["optimizer_base_url"] == "http://opt-qwen:8000/v1"
+    assert qwen_kwargs["optimizer_api_key"] == "opt-qwen-key"
+    assert qwen_kwargs["optimizer_temperature"] == 0.2
+    assert qwen_kwargs["optimizer_timeout_seconds"] == 90.0
+    assert qwen_kwargs["optimizer_max_tokens"] == 2048
+    assert qwen_kwargs["optimizer_enable_thinking"] is True
+    assert qwen_kwargs["optimizer_thinking_mode"] == "deep"
+    assert qwen_kwargs["target_base_url"] == "http://tgt-qwen:8000/v1"
+
+
