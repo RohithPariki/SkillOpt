@@ -1,4 +1,5 @@
 """OpenAI-compatible MiniMax chat backend for the target path."""
+
 from __future__ import annotations
 
 import json
@@ -33,10 +34,7 @@ def normalize_region(region: str | None) -> str:
     if not normalized:
         return DEFAULT_REGION
     if normalized not in REGION_BASE_URLS:
-        raise ValueError(
-            f"Unsupported MiniMax region: {region!r}. "
-            f"Supported values are {sorted(REGION_BASE_URLS)}."
-        )
+        raise ValueError(f"Unsupported MiniMax region: {region!r}. Supported values are {sorted(REGION_BASE_URLS)}.")
     return normalized
 
 
@@ -67,6 +65,10 @@ ENABLE_THINKING = os.environ.get("MINIMAX_ENABLE_THINKING", "false").strip().low
 
 TARGET_DEPLOYMENT = os.environ.get(
     "TARGET_DEPLOYMENT",
+    default_model_for_backend("minimax_chat"),
+)
+OPTIMIZER_DEPLOYMENT = os.environ.get(
+    "OPTIMIZER_DEPLOYMENT",
     default_model_for_backend("minimax_chat"),
 )
 
@@ -208,9 +210,7 @@ def _chat_messages_impl(
         "messages": _json_safe(messages),
         "max_tokens": min(max_completion_tokens, MAX_TOKENS),
     }
-    payload["thinking"] = {
-        "type": _resolve_thinking_type(deployment or TARGET_DEPLOYMENT)
-    }
+    payload["thinking"] = {"type": _resolve_thinking_type(deployment or TARGET_DEPLOYMENT)}
     if TEMPERATURE is not None:
         payload["temperature"] = TEMPERATURE
     if tools:
@@ -237,7 +237,7 @@ def _chat_messages_impl(
             return text, usage_info
         except Exception as e:  # noqa: BLE001
             last_err = e
-            time.sleep(min(2 ** attempt, 30))
+            time.sleep(min(2**attempt, 30))
     raise RuntimeError(f"MiniMax chat call failed after {retries} retries: {last_err}")
 
 
