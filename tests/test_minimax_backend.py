@@ -88,12 +88,19 @@ def _record_urlopen(monkeypatch: pytest.MonkeyPatch, backend: Any) -> _UrlopenRe
     return recorder
 
 
-def test_default_deployment_is_current_model(minimax_backend: Any) -> None:
+def test_default_deployment_is_current_model(monkeypatch: pytest.MonkeyPatch) -> None:
     from skillopt.model.common import default_model_for_backend
+    
+    _install_openai_stub()
+    monkeypatch.delenv("TARGET_DEPLOYMENT", raising=False)
+    monkeypatch.delenv("OPTIMIZER_DEPLOYMENT", raising=False)
+    
+    from skillopt.model import minimax_backend as backend
+    module = importlib.reload(backend)
 
     assert default_model_for_backend("minimax_chat") == "MiniMax-M3"
-    assert minimax_backend.TARGET_DEPLOYMENT == "MiniMax-M3"
-    assert minimax_backend.OPTIMIZER_DEPLOYMENT == "MiniMax-M3"
+    assert module.TARGET_DEPLOYMENT == "MiniMax-M3"
+    assert module.OPTIMIZER_DEPLOYMENT == "MiniMax-M3"
 
 
 def test_always_on_model_sends_adaptive_not_disabled(monkeypatch: pytest.MonkeyPatch, minimax_backend: Any) -> None:
