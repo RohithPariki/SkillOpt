@@ -706,13 +706,21 @@ def main() -> None:
         max_tokens=cfg.get("openai_compatible_max_tokens"),
         optimizer_base_url=cfg.get("optimizer_openai_compatible_base_url") or None,
         optimizer_api_key=cfg.get("optimizer_openai_compatible_api_key") or None,
-        optimizer_model=cfg.get("optimizer_openai_compatible_model") or None,
+        optimizer_model=(
+            cfg["optimizer_model"]
+            if cfg.get("optimizer_backend") == "openai_compatible"
+            else (cfg.get("optimizer_openai_compatible_model") or None)
+        ),
         optimizer_temperature=cfg.get("optimizer_openai_compatible_temperature"),
         optimizer_timeout_seconds=cfg.get("optimizer_openai_compatible_timeout_seconds"),
         optimizer_max_tokens=cfg.get("optimizer_openai_compatible_max_tokens"),
         target_base_url=cfg.get("target_openai_compatible_base_url") or None,
         target_api_key=cfg.get("target_openai_compatible_api_key") or None,
-        target_model=cfg.get("target_openai_compatible_model") or None,
+        target_model=(
+            cfg["target_model"]
+            if cfg.get("target_backend") == "openai_compatible"
+            else (cfg.get("target_openai_compatible_model") or None)
+        ),
         target_temperature=cfg.get("target_openai_compatible_temperature"),
         target_timeout_seconds=cfg.get("target_openai_compatible_timeout_seconds"),
         target_max_tokens=cfg.get("target_openai_compatible_max_tokens"),

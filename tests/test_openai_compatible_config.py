@@ -458,3 +458,76 @@ def test_eval_only_forwards_optimizer_qwen_chat_kwargs(monkeypatch: pytest.Monke
     assert qwen_kwargs["target_base_url"] == "http://tgt-qwen:8000/v1"
 
 
+
+def test_trainer_preserves_explicit_role_models(monkeypatch: pytest.MonkeyPatch) -> None:
+    import skillopt.engine.trainer as trainer_mod
+    from skillopt.envs.base import EnvAdapter
+    import skillopt.model.openai_compatible_backend as openai_compat
+
+    class EarlyExit(Exception):
+        pass
+
+    def stop_after_model_config(*args, **kwargs):
+        raise EarlyExit()
+
+    monkeypatch.setattr(trainer_mod, "_configure_trace_to_optimizer_gates", stop_after_model_config)
+
+    cfg = {
+        "model_backend": "openai_compatible",
+        "optimizer_backend": "openai_compatible",
+        "target_backend": "openai_compatible",
+        "optimizer_model": "explicit-optimizer-model",
+        "target_model": "explicit-target-model",
+        "openai_compatible_base_url": "https://api.test.com/v1",
+        "openai_compatible_model": "fallback-shared",
+        "skill_init": "skills/empty.md",
+        "num_epochs": 1,
+        "train_size": 1,
+        "batch_size": 1,
+        "accumulation": 1,
+        "merge_batch_size": 2,
+        "edit_budget": 2,
+        "seed": 42,
+        "out_root": "/tmp/out",
+    }
+
+    mock_adapter = mock.create_autospec(EnvAdapter, instance=True)
+    mock_adapter.requires_ray.return_value = False
+    mock_adapter.get_dataloader.return_value = None
+
+    trainer = trainer_mod.ReflACTTrainer(cfg, mock_adapter)
+    with pytest.raises(EarlyExit):
+        trainer.train()
+
+    assert openai_compat.OPTIMIZER_CONFIG.deployment == "explicit-optimizer-model"
+    assert openai_compat.TARGET_CONFIG.deployment == "explicit-target-model"
+
+
+def test_eval_only_preserves_explicit_role_models(monkeypatch: pytest.MonkeyPatch) -> None:
+    import skillopt.model.openai_compatible_backend as openai_compat
+
+    cfg = {
+        "model_backend": "openai_compatible",
+        "optimizer_backend": "openai_compatible",
+        "target_backend": "openai_compatible",
+        "optimizer_model": "eval-optimizer-model",
+        "target_model": "eval-target-model",
+        "openai_compatible_base_url": "https://api.test.com/v1",
+        "openai_compatible_model": "fallback-shared",
+    }
+    
+    class EarlyExit(Exception):
+        pass
+        
+    def stop_after_config(*args, **kwargs):
+        raise EarlyExit()
+        
+    monkeypatch.setattr(eval_only_script, "set_reasoning_effort", stop_after_config)
+
+    with mock.patch("scripts.eval_only.load_config", return_value=cfg):
+        with mock.patch("scripts.eval_only.parse_args"):
+            with pytest.raises(EarlyExit):
+                eval_only_script.main()
+
+    assert openai_compat.OPTIMIZER_CONFIG.deployment == "eval-optimizer-model"
+    assert openai_compat.TARGET_CONFIG.deployment == "eval-target-model"

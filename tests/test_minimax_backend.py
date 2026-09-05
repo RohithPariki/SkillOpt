@@ -65,9 +65,13 @@ def _install_openai_stub() -> None:
     sys.modules["openai"] = openai_stub
 
 
-@pytest.fixture()
-def minimax_backend() -> Iterator[Any]:
+@pytest.fixture
+def minimax_backend(monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
     _install_openai_stub()
+    
+    # Isolate environment variables to avoid cross-test pollution
+    monkeypatch.setattr(os, "environ", os.environ.copy())
+    
     from skillopt.model import minimax_backend as backend
 
     snapshot = {
