@@ -71,8 +71,11 @@ def minimax_backend(monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
     
     # Isolate environment variables to avoid cross-test pollution
     monkeypatch.setattr(os, "environ", os.environ.copy())
+    monkeypatch.delenv("TARGET_DEPLOYMENT", raising=False)
+    monkeypatch.delenv("OPTIMIZER_DEPLOYMENT", raising=False)
     
     from skillopt.model import minimax_backend as backend
+    importlib.reload(backend)
 
     snapshot = {
         "ENABLE_THINKING": backend.ENABLE_THINKING,
