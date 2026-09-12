@@ -3152,3 +3152,130 @@ def adopt(staging_dir: str) -> List[str]:
             receipt_after=receipt_after,
         )
         return updated
+
+
+def revert_skills(
+    staging_dir: str, skill_names: Optional[Sequence[str]] = None
+) -> List[AdoptedSkill]:
+    """Revert adopted skills back to their pre-adoption state using backups."""
+    staging_dir = _canonical_staging_dir(staging_dir)
+    receipt_path = os.path.join(staging_dir, "adopted_skills.json")
+    if not os.path.exists(receipt_path):
+        return []
+    with open(receipt_path, encoding="utf-8") as f:
+        existing_receipts = json.load(f)
+    
+    if skill_names is not None:
+        names = {str(name).strip() for name in skill_names if str(name).strip()}
+        rows = [r for r in existing_receipts if r["skill_name"] in names]
+    else:
+        rows = list(existing_receipts)
+        
+    if not rows:
+        return []
+        
+    receipts_to_return: List[AdoptedSkill] = []
+    remaining_receipts: List[Dict[str, Any]] = [
+        r for r in existing_receipts if r not in rows
+    ]
+
+    for row in rows:
+        name = row["skill_name"]
+        live = row["live_skill_path"]
+        before_sha = row["sha256_before"]
+        after_sha = row["sha256_after"]
+        backup = row["backup_path"]
+        
+        current, current_mode, _ = _file_snapshot(live)
+        current_sha = _bytes_sha256(current)
+        if current_sha == before_sha:
+            receipts_to_return.append(AdoptedSkill(
+                skill_name=name,
+                live_skill_path=live,
+                sha256_before=after_sha,
+                sha256_after=before_sha,
+                backup_path="",
+            ))
+            continue
+            
+        if current_sha != after_sha:
+            raise StagingError(f"live skill for {name!r} changed since adoption; cannot safely revert")
+            
+        if before_sha != "":
+            if not backup or not os.path.lexists(backup):
+                raise StagingError(f"backup for {name!r} is missing; cannot revert")
+            with open(backup, "rb") as f:
+                proposed_bytes = f.read()
+            if hashlib.sha256(proposed_bytes).hexdigest() != before_sha:
+                raise StagingError(f"backup for {name!r} changed; cannot safely revert")
+            _write_atomic_bytes(live, proposed_bytes, mode=current_mode)
+        else:
+            if current is not None:
+                os.unlink(live)
+                
+        receipts_to_return.append(AdoptedSkill(
+            skill_name=name,
+            live_skill_path=live,
+            sha256_before=after_sha,
+            sha256_after=before_sha,
+            backup_path="",
+        ))
+        
+    _write_atomic(
+        receipt_path,
+        json.dumps(remaining_receipts, ensure_ascii=False, indent=2),
+        create_parents=False,
+    )
+    return receipts_to_return
+
+
+def revert(staging_dir: str) -> List[str]:
+    """Revert adopted legacy managed skills back to their pre-adoption state."""
+    staging_dir = _canonical_staging_dir(staging_dir)
+    receipt_path = os.path.join(staging_dir, "adopted_legacy.json")
+    if not os.path.exists(receipt_path):
+        return []
+    with open(receipt_path, encoding="utf-8") as f:
+        existing_receipts = json.load(f)
+        
+    if not existing_receipts:
+        return []
+        
+    updated: List[str] = []
+    
+    for row in existing_receipts:
+        label = row["target"]
+        live = row["live_path"]
+        before_sha = row["sha256_before"]
+        after_sha = row["sha256_after"]
+        backup = row["backup_path"]
+        
+        current, current_mode, _ = _file_snapshot(live)
+        current_sha = _bytes_sha256(current)
+        if current_sha == before_sha:
+            updated.append(live)
+            continue
+
+        if current_sha != after_sha:
+            raise StagingError(f"legacy {label} changed since adoption; cannot safely revert")
+            
+        if before_sha != "":
+            if not backup or not os.path.lexists(backup):
+                raise StagingError(f"legacy backup for {label} is missing; cannot revert")
+            with open(backup, "rb") as f:
+                proposed_bytes = f.read()
+            if hashlib.sha256(proposed_bytes).hexdigest() != before_sha:
+                raise StagingError(f"legacy backup for {label} changed; cannot safely revert")
+            _write_atomic_bytes(live, proposed_bytes, mode=current_mode)
+        else:
+            if current is not None:
+                os.unlink(live)
+                
+        updated.append(live)
+        
+    _write_atomic(
+        receipt_path,
+        json.dumps([], ensure_ascii=False, indent=2),
+        create_parents=False,
+    )
+    return updated
