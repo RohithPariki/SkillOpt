@@ -68,12 +68,12 @@ def _install_openai_stub() -> None:
 @pytest.fixture
 def minimax_backend(monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
     _install_openai_stub()
-    
+
     # Isolate environment variables to avoid cross-test pollution
     monkeypatch.setattr(os, "environ", os.environ.copy())
     monkeypatch.delenv("TARGET_DEPLOYMENT", raising=False)
     monkeypatch.delenv("OPTIMIZER_DEPLOYMENT", raising=False)
-    
+
     from skillopt.model import minimax_backend as backend
     importlib.reload(backend)
 

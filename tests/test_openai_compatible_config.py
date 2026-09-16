@@ -516,17 +516,17 @@ def test_eval_only_preserves_explicit_role_models(monkeypatch: pytest.MonkeyPatc
         "openai_compatible_model": "fallback-shared",
         "out_root": "/tmp/out",
     }
-    
+
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
         f.write("# Dummy Skill\n")
         skill_path = f.name
 
     class EarlyExit(Exception):
         pass
-        
+
     def stop_after_config(*args, **kwargs):
         raise EarlyExit()
-        
+
     monkeypatch.setattr(eval_only_script, "set_reasoning_effort", stop_after_config)
 
     fake_args = mock.Mock()
@@ -539,4 +539,3 @@ def test_eval_only_preserves_explicit_role_models(monkeypatch: pytest.MonkeyPatc
 
     assert openai_compat.OPTIMIZER_CONFIG.deployment == "eval-optimizer-model"
     assert openai_compat.TARGET_CONFIG.deployment == "eval-target-model"
-
