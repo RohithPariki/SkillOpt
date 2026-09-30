@@ -305,6 +305,34 @@ class TestLegacyAdoptionIsConfinedToTheStagedRoots(unittest.TestCase):
             self.assertEqual(_read(skill), "# skill v2\n")
             self.assertEqual(_read(memory), "# memory v2\n")
 
+    def test_legacy_adoption_accepts_explicit_target_outside_native_roots(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            live_root = os.path.join(_canonical(tmp), "live")
+            skill = os.path.join(live_root, "outside", "SKILL.md")
+            memory = os.path.join(live_root, "CLAUDE.md")
+            os.makedirs(os.path.dirname(skill), exist_ok=True)
+            _write(skill, "# skill v1\n")
+            _write(memory, "# memory v1\n")
+            
+            # Explicit target_skill_path outside the passed native skill_roots
+            native_root = os.path.join(live_root, "native")
+            
+            staging = write_staging(
+                tmp,
+                report=SleepReport(night=1, project=tmp, accepted=True),
+                proposed_skill="# skill v2\n",
+                proposed_memory="# memory v2\n",
+                live_skill_path=skill,
+                live_memory_path=memory,
+                report_md="# report\n",
+                skill_roots=[native_root],
+            )
+            
+            # Adopt should succeed because the explicitly configured target is added
+            # to the authoritative destination policy in write_staging.
+            updated = adopt(staging)
+            self.assertEqual(updated, [skill, memory])
+
 
 class TestStagedSkills(unittest.TestCase):
     def test_rows_are_readable_from_the_manifest(self):

@@ -1099,15 +1099,15 @@ def write_staging(
                 for row in skill_rows
                 if str(row.get("live_skill_path") or "").strip()
             )
-        if live_skill_path and str(live_skill_path).strip():
-            live_abs = os.path.abspath(live_skill_path)
-            dir1 = os.path.dirname(live_abs)
-            dir2 = os.path.dirname(dir1)
-            proj_abs = os.path.abspath(project)
-            if dir1 == proj_abs or dir2 == proj_abs:
-                recorded_roots.append(dir1)
-            else:
-                recorded_roots.append(dir2)
+    if live_skill_path and str(live_skill_path).strip():
+        live_abs = os.path.abspath(live_skill_path)
+        dir1 = os.path.dirname(live_abs)
+        dir2 = os.path.dirname(dir1)
+        proj_abs = os.path.abspath(project)
+        if dir1 == proj_abs or dir2 == proj_abs:
+            recorded_roots.append(dir1)
+        else:
+            recorded_roots.append(dir2)
     manifest["skill_roots"] = list(dict.fromkeys(recorded_roots))
     if skill_rows:
         manifest["skills"] = skill_rows
