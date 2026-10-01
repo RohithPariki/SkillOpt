@@ -40,8 +40,11 @@ from skillopt_sleep.mine import mine
 from skillopt_sleep.staging import (
     StagingError,
     adopt_skills,
+    adopted_skill_names,
+    has_adopted_legacy,
     has_pending_staged_managed,
     json_safe,
+    latest_adopted_staging,
     latest_staging,
     pending_staged_skills,
     revert_skills,
@@ -566,12 +569,14 @@ def cmd_status(args) -> int:
             all_skills = []
             skills = []
             has_managed = False
+    revertable = latest_adopted_staging(project)
     info = {
         "night": state.night,
         "state_path": cfg.state_path,
         "project": project,
         "history_tail": state.data.get("history", [])[-5:],
         "latest_staging": latest,
+        "revertable_staging": revertable,
         "slow_memory_chars": len(state.slow_memory),
         "staged_skills": [r.get("skill_name", "") for r in skills],
         "adopted_skills": [
@@ -588,6 +593,8 @@ def cmd_status(args) -> int:
     else:
         print(f"[sleep] nights so far: {state.night}")
         print(f"[sleep] project: {project}")
+        if revertable:
+            print(f"[sleep] revertable adoption: {_display_value(revertable)}")
         if latest:
             print(f"[sleep] latest staged proposal: {_display_value(latest)}")
             if staging_error:
@@ -784,7 +791,7 @@ def cmd_adopt(args) -> int:
 def cmd_revert(args) -> int:
     cfg = _cfg_from_args(args)
     project = cfg.get("invoked_project") or os.getcwd()
-    target = args.staging or latest_staging(project)
+    target = args.staging or latest_adopted_staging(project)
 
     def fail(code: int, kind: str, message: str, **extra: Any) -> int:
         safe_message = _display_value(message)
@@ -801,8 +808,6 @@ def cmd_revert(args) -> int:
             print(safe_message)
         return code
 
-    if not target or not os.path.isdir(target):
-        return fail(1, "no_staging", "[sleep] nothing to revert (no staging dir).")
     raw_selected = list(getattr(args, "skills", None) or [])
     if any(not str(name).strip() for name in raw_selected):
         return fail(
@@ -819,15 +824,30 @@ def cmd_revert(args) -> int:
             "invalid_selection",
             "[sleep] use exactly one of --skill, --all-skills, or --legacy.",
         )
-    try:
-        # Reusing staged_skills here as a sanity check that it's a valid staging dir.
-        rows = staged_skills(target)
-    except Exception as exc:
-        return fail(
-            1,
-            "invalid_staging",
-            f"[sleep] cannot read staged skills for revert: {exc}",
-        )
+
+    if not target:
+        return fail(1, "no_staging", "[sleep] nothing to revert.")
+    if not os.path.isdir(target):
+        return fail(1, "no_staging", f"[sleep] staging directory not found: {_display_value(target)}.")
+
+    has_legacy = has_adopted_legacy(target)
+    adopted_names = adopted_skill_names(target)
+
+    if not revert_legacy and not selected and not revert_all:
+        if has_legacy and adopted_names:
+            return fail(
+                2,
+                "selection_required",
+                "[sleep] both per-skill and legacy proposals were adopted from this night; "
+                "pass --skill NAME or --all-skills, or use --legacy.",
+            )
+        if not has_legacy and not adopted_names:
+            return fail(1, "nothing_to_revert", f"[sleep] nothing to revert from {_display_value(target)}.")
+        if has_legacy:
+            revert_legacy = True
+        else:
+            revert_all = True
+
     if revert_legacy:
         try:
             updated = revert_staging(target)
@@ -850,53 +870,31 @@ def cmd_revert(args) -> int:
             if not updated:
                 print("[sleep] (no adopted managed changes to revert)")
         return 0
-    if selected or revert_all:
-        # Assuming revert_skills behaves similarly to adopt_skills returning receipts.
-        names = selected if not revert_all else None
-        try:
-            receipts = revert_skills(target, names)
-        except StagingError as exc:
-            return fail(2, "revert_refused", f"[sleep] revert refused: {exc}")
-        except OSError as exc:
-            return fail(1, "revert_failed", f"[sleep] revert failed: {exc}")
-        if args.json:
-            print(json.dumps(json_safe({
-                "ok": True,
-                "staging_dir": target,
-                "mode": "skills",
-                "reverted_skills": [receipt.__dict__ for receipt in receipts],
-                "updated_paths": [receipt.live_skill_path for receipt in receipts],
-            }), ensure_ascii=False, indent=2))
-        else:
-            print(f"[sleep] reverted from {_display_value(target)}")
-            for receipt in receipts:
-                print(
-                    f"   <- {_display_value(receipt.skill_name)}: "
-                    f"{_display_value(receipt.live_skill_path)}"
-                )
-            if not receipts:
-                print("[sleep] (no skills to revert in the selection)")
-        return 0
+
+    names = selected if not revert_all else None
     try:
-        updated = revert_staging(target)
+        receipts = revert_skills(target, names)
     except StagingError as exc:
         return fail(2, "revert_refused", f"[sleep] revert refused: {exc}")
-    except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
+    except OSError as exc:
         return fail(1, "revert_failed", f"[sleep] revert failed: {exc}")
     if args.json:
-        print(json.dumps({
+        print(json.dumps(json_safe({
             "ok": True,
             "staging_dir": target,
-            "mode": "legacy",
-            "reverted_skills": [],
-            "updated_paths": updated,
-        }, ensure_ascii=False, indent=2))
+            "mode": "skills",
+            "reverted_skills": [receipt.__dict__ for receipt in receipts],
+            "updated_paths": [receipt.live_skill_path for receipt in receipts],
+        }), ensure_ascii=False, indent=2))
     else:
         print(f"[sleep] reverted from {_display_value(target)}")
-        for path in updated:
-            print(f"   <- {_display_value(path)}")
-        if not updated:
-            print("[sleep] (no adopted changes to revert)")
+        for receipt in receipts:
+            print(
+                f"   <- {_display_value(receipt.skill_name)}: "
+                f"{_display_value(receipt.live_skill_path)}"
+            )
+        if not receipts:
+            print("[sleep] (no skills to revert in the selection)")
     return 0
 
 
