@@ -302,7 +302,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_config(args: argparse.Namespace) -> dict:
-    from skillopt.config import flatten_config, is_structured, load_config as _load
+    from skillopt.config import flatten_config, is_structured
+    from skillopt.config import load_config as _load
 
     cfg = _load(args.config, overrides=args.cfg_options)
     structured = is_structured(cfg)
@@ -511,25 +512,25 @@ def load_config(args: argparse.Namespace) -> dict:
 
     if cfg.get("optimizer_backend") == "claude_chat":
         if (
-            str(cfg.get("optimizer_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS
+            (not cfg.get("optimizer_model") or str(cfg.get("optimizer_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS)
             and not _has_model_override("model.optimizer", "optimizer_model")
         ):
             cfg["optimizer_model"] = default_model_for_backend("claude_chat")
     if cfg.get("optimizer_backend") == "claude_code_exec":
         if (
-            str(cfg.get("optimizer_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS
+            (not cfg.get("optimizer_model") or str(cfg.get("optimizer_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS)
             and not _has_model_override("model.optimizer", "optimizer_model")
         ):
             cfg["optimizer_model"] = default_model_for_backend("claude_code_exec")
     if cfg.get("optimizer_backend") == "qwen_chat":
         if (
-            str(cfg.get("optimizer_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS
+            (not cfg.get("optimizer_model") or str(cfg.get("optimizer_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS)
             and not _has_model_override("model.optimizer", "optimizer_model")
         ):
             cfg["optimizer_model"] = default_model_for_backend("qwen_chat")
     if cfg.get("optimizer_backend") == "openai_compatible":
         if (
-            str(cfg.get("optimizer_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS
+            (not cfg.get("optimizer_model") or str(cfg.get("optimizer_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS)
             and not _has_model_override("model.optimizer", "optimizer_model")
         ):
             cfg["optimizer_model"] = (
@@ -539,38 +540,38 @@ def load_config(args: argparse.Namespace) -> dict:
             )
     if cfg.get("target_backend") == "claude_chat":
         if (
-            str(cfg.get("target_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS
+            (not cfg.get("target_model") or str(cfg.get("target_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS)
             and not _has_model_override("model.target", "target_model")
         ):
             cfg["target_model"] = default_model_for_backend("claude_chat")
     if cfg.get("target_backend") == "claude_code_exec":
         if (
-            str(cfg.get("target_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS
+            (not cfg.get("target_model") or str(cfg.get("target_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS)
             and not _has_model_override("model.target", "target_model")
         ):
             cfg["target_model"] = default_model_for_backend("claude_chat")
     if cfg.get("target_backend") == "cursor_exec":
         if (
-            str(cfg.get("target_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS
+            (not cfg.get("target_model") or str(cfg.get("target_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS)
             and not _has_model_override("model.target", "target_model")
         ):
             cfg["target_model"] = default_model_for_backend("cursor_exec")
     if cfg.get("target_backend") == "copilot_exec":
         if (
-            str(cfg.get("target_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS
+            (not cfg.get("target_model") or str(cfg.get("target_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS)
             and not _has_model_override("model.target", "target_model")
         ):
             # Copilot CLI model IDs are independent of Azure deployment names.
             cfg["target_model"] = ""
     if cfg.get("target_backend") == "qwen_chat":
         if (
-            str(cfg.get("target_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS
+            (not cfg.get("target_model") or str(cfg.get("target_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS)
             and not _has_model_override("model.target", "target_model")
         ):
             cfg["target_model"] = default_model_for_backend("qwen_chat")
     if cfg.get("target_backend") == "minimax_chat":
         if (
-            str(cfg.get("target_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS
+            (not cfg.get("target_model") or str(cfg.get("target_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS)
             and not _has_model_override("model.target", "target_model")
         ):
             cfg["target_model"] = (
@@ -579,7 +580,7 @@ def load_config(args: argparse.Namespace) -> dict:
             )
     if cfg.get("target_backend") == "openai_compatible":
         if (
-            str(cfg.get("target_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS
+            (not cfg.get("target_model") or str(cfg.get("target_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS)
             and not _has_model_override("model.target", "target_model")
         ):
             cfg["target_model"] = (
@@ -707,7 +708,7 @@ def main() -> None:
         optimizer_base_url=cfg.get("optimizer_openai_compatible_base_url") or None,
         optimizer_api_key=cfg.get("optimizer_openai_compatible_api_key") or None,
         optimizer_model=(
-            cfg["optimizer_model"]
+            cfg.get("optimizer_model")
             if cfg.get("optimizer_backend") == "openai_compatible"
             else (cfg.get("optimizer_openai_compatible_model") or None)
         ),
@@ -717,7 +718,7 @@ def main() -> None:
         target_base_url=cfg.get("target_openai_compatible_base_url") or None,
         target_api_key=cfg.get("target_openai_compatible_api_key") or None,
         target_model=(
-            cfg["target_model"]
+            cfg.get("target_model")
             if cfg.get("target_backend") == "openai_compatible"
             else (cfg.get("target_openai_compatible_model") or None)
         ),

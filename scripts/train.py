@@ -521,7 +521,8 @@ def load_config(args: argparse.Namespace) -> dict:
     """Load config with _base_ inheritance, then apply CLI overrides."""
     import warnings
 
-    from skillopt.config import flatten_config, is_structured, load_config as _load
+    from skillopt.config import flatten_config, is_structured
+    from skillopt.config import load_config as _load
 
     # F08: Warn when API keys are supplied on the CLI. Keep the replacement
     # guidance specific to each backend and, where applicable, each role.
@@ -728,25 +729,25 @@ def load_config(args: argparse.Namespace) -> dict:
 
     if flat.get("optimizer_backend") == "claude_chat":
         if (
-            str(flat.get("optimizer_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS
+            (not flat.get("optimizer_model") or str(flat.get("optimizer_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS)
             and not _has_model_override("model.optimizer", "optimizer_model")
         ):
             flat["optimizer_model"] = default_model_for_backend("claude_chat")
     if flat.get("optimizer_backend") == "claude_code_exec":
         if (
-            str(flat.get("optimizer_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS
+            (not flat.get("optimizer_model") or str(flat.get("optimizer_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS)
             and not _has_model_override("model.optimizer", "optimizer_model")
         ):
             flat["optimizer_model"] = default_model_for_backend("claude_code_exec")
     if flat.get("optimizer_backend") == "qwen_chat":
         if (
-            str(flat.get("optimizer_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS
+            (not flat.get("optimizer_model") or str(flat.get("optimizer_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS)
             and not _has_model_override("model.optimizer", "optimizer_model")
         ):
             flat["optimizer_model"] = default_model_for_backend("qwen_chat")
     if flat.get("optimizer_backend") == "openai_compatible":
         if (
-            str(flat.get("optimizer_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS
+            (not flat.get("optimizer_model") or str(flat.get("optimizer_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS)
             and not _has_model_override("model.optimizer", "optimizer_model")
         ):
             flat["optimizer_model"] = (
@@ -756,38 +757,38 @@ def load_config(args: argparse.Namespace) -> dict:
             )
     if flat.get("target_backend") == "claude_chat":
         if (
-            str(flat.get("target_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS
+            (not flat.get("target_model") or str(flat.get("target_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS)
             and not _has_model_override("model.target", "target_model")
         ):
             flat["target_model"] = default_model_for_backend("claude_chat")
     if flat.get("target_backend") == "claude_code_exec":
         if (
-            str(flat.get("target_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS
+            (not flat.get("target_model") or str(flat.get("target_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS)
             and not _has_model_override("model.target", "target_model")
         ):
             flat["target_model"] = default_model_for_backend("claude_chat")
     if flat.get("target_backend") == "cursor_exec":
         if (
-            str(flat.get("target_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS
+            (not flat.get("target_model") or str(flat.get("target_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS)
             and not _has_model_override("model.target", "target_model")
         ):
             flat["target_model"] = default_model_for_backend("cursor_exec")
     if flat.get("target_backend") == "copilot_exec":
         if (
-            str(flat.get("target_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS
+            (not flat.get("target_model") or str(flat.get("target_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS)
             and not _has_model_override("model.target", "target_model")
         ):
             # Copilot CLI model IDs are independent of Azure deployment names.
             flat["target_model"] = ""
     if flat.get("target_backend") == "qwen_chat":
         if (
-            str(flat.get("target_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS
+            (not flat.get("target_model") or str(flat.get("target_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS)
             and not _has_model_override("model.target", "target_model")
         ):
             flat["target_model"] = default_model_for_backend("qwen_chat")
     if flat.get("target_backend") == "minimax_chat":
         if (
-            str(flat.get("target_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS
+            (not flat.get("target_model") or str(flat.get("target_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS)
             and not _has_model_override("model.target", "target_model")
         ):
             flat["target_model"] = (
@@ -796,7 +797,7 @@ def load_config(args: argparse.Namespace) -> dict:
             )
     if flat.get("target_backend") == "openai_compatible":
         if (
-            str(flat.get("target_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS
+            (not flat.get("target_model") or str(flat.get("target_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS)
             and not _has_model_override("model.target", "target_model")
         ):
             flat["target_model"] = (
@@ -823,7 +824,7 @@ def main() -> None:
     cfg = load_config(args)
 
     print(f"\n{'='*60}")
-    print(f"  SkillOpt — Executive Strategy for Self-Evolving Agent Skills")
+    print("  SkillOpt — Executive Strategy for Self-Evolving Agent Skills")
     print(f"{'='*60}")
     print(f"  env:            {cfg.get('env')}")
     print(f"  optimizer_model:  {cfg.get('optimizer_model')}")
@@ -834,7 +835,7 @@ def main() -> None:
     print(f"  rewrite_effort: {cfg.get('rewrite_reasoning_effort') or 'off'}")
     print(f"  epochs:         {cfg.get('num_epochs')}")
     print(f"  train_size:     {cfg.get('train_size') or 'from dataset'}")
-    print(f"  steps/epoch:    auto")
+    print("  steps/epoch:    auto")
     print(f"  batch_size:     {cfg.get('batch_size')}")
     print(f"  edit_budget:    {cfg.get('edit_budget')}")
     print(f"  lr_scheduler:   {cfg.get('lr_scheduler', 'constant')}")

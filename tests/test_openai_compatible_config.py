@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 from unittest import mock
 
@@ -461,8 +462,8 @@ def test_eval_only_forwards_optimizer_qwen_chat_kwargs(monkeypatch: pytest.Monke
 
 def test_trainer_preserves_explicit_role_models(monkeypatch: pytest.MonkeyPatch) -> None:
     import skillopt.engine.trainer as trainer_mod
-    from skillopt.envs.base import EnvAdapter
     import skillopt.model.openai_compatible_backend as openai_compat
+    from skillopt.envs.base import EnvAdapter
 
     class EarlyExit(Exception):
         pass
@@ -539,3 +540,137 @@ def test_eval_only_preserves_explicit_role_models(monkeypatch: pytest.MonkeyPatc
 
     assert openai_compat.OPTIMIZER_CONFIG.deployment == "eval-optimizer-model"
     assert openai_compat.TARGET_CONFIG.deployment == "eval-target-model"
+
+
+def test_eval_only_minimal_yaml_resolves_runtime_models(monkeypatch: pytest.MonkeyPatch) -> None:
+    import skillopt.model.openai_compatible_backend as openai_compat
+
+    raw = {
+        "model": {
+            "backend": "openai_compatible",
+            "openai_compatible_model": "synthetic-model",
+            "openai_compatible_base_url": "http://audit.invalid/v1",
+        },
+        "env": {"name": "searchqa"},
+    }
+    with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f_yaml:
+        yaml.dump(raw, f_yaml)
+        config_path = f_yaml.name
+
+    with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f_skill:
+        f_skill.write("# Test Skill\n")
+        skill_path = f_skill.name
+
+    class EarlyExit(Exception):
+        pass
+
+    def stop_after_config(*args, **kwargs):
+        raise EarlyExit()
+
+    monkeypatch.setattr(eval_only_script, "set_reasoning_effort", stop_after_config)
+
+    cli_args = ["eval_only.py", "--config", config_path, "--skill", skill_path]
+    with mock.patch("sys.argv", cli_args):
+        with pytest.raises(EarlyExit):
+            eval_only_script.main()
+
+    assert openai_compat.OPTIMIZER_CONFIG.deployment == "synthetic-model"
+    assert openai_compat.TARGET_CONFIG.deployment == "synthetic-model"
+    assert os.environ.get("OPTIMIZER_DEPLOYMENT") == "synthetic-model"
+    assert os.environ.get("TARGET_DEPLOYMENT") == "synthetic-model"
+    assert openai_compat.OPTIMIZER_CONFIG.base_url == "http://audit.invalid/v1"
+    assert openai_compat.TARGET_CONFIG.base_url == "http://audit.invalid/v1"
+
+
+def test_eval_only_minimal_yaml_with_role_override_and_backend_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    import skillopt.model.openai_compatible_backend as openai_compat
+
+    # Case 1: Role-specific compatible override
+    raw_role = {
+        "model": {
+            "backend": "openai_compatible",
+            "openai_compatible_model": "synthetic-shared",
+            "optimizer_openai_compatible_model": "synthetic-opt",
+            "openai_compatible_base_url": "http://audit.invalid/v1",
+        },
+        "env": {"name": "searchqa"},
+    }
+    with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f_yaml:
+        yaml.dump(raw_role, f_yaml)
+        config_path = f_yaml.name
+
+    with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f_skill:
+        f_skill.write("# Test Skill\n")
+        skill_path = f_skill.name
+
+    class EarlyExit(Exception):
+        pass
+
+    def stop_after_config(*args, **kwargs):
+        raise EarlyExit()
+
+    monkeypatch.setattr(eval_only_script, "set_reasoning_effort", stop_after_config)
+
+    with mock.patch("sys.argv", ["eval_only.py", "--config", config_path, "--skill", skill_path]):
+        with pytest.raises(EarlyExit):
+            eval_only_script.main()
+
+    assert openai_compat.OPTIMIZER_CONFIG.deployment == "synthetic-opt"
+    assert openai_compat.TARGET_CONFIG.deployment == "synthetic-shared"
+
+    # Case 2: Minimal YAML with no model specified falls back to backend default (gpt-4o-mini)
+    raw_default = {
+        "model": {
+            "backend": "openai_compatible",
+            "openai_compatible_base_url": "http://audit.invalid/v1",
+        },
+        "env": {"name": "searchqa"},
+    }
+    with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f_yaml_def:
+        yaml.dump(raw_default, f_yaml_def)
+        config_path_def = f_yaml_def.name
+
+    with mock.patch("sys.argv", ["eval_only.py", "--config", config_path_def, "--skill", skill_path]):
+        with pytest.raises(EarlyExit):
+            eval_only_script.main()
+
+    assert openai_compat.OPTIMIZER_CONFIG.deployment == "gpt-4o-mini"
+    assert openai_compat.TARGET_CONFIG.deployment == "gpt-4o-mini"
+
+    # Case 3: Explicit per-role CLI overrides take precedence over minimal YAML
+    with mock.patch(
+        "sys.argv",
+        [
+            "eval_only.py",
+            "--config", config_path,
+            "--skill", skill_path,
+            "--optimizer_model", "cli-optimizer",
+            "--target_model", "cli-target",
+        ],
+    ):
+        with pytest.raises(EarlyExit):
+            eval_only_script.main()
+
+    assert openai_compat.OPTIMIZER_CONFIG.deployment == "cli-optimizer"
+    assert openai_compat.TARGET_CONFIG.deployment == "cli-target"
+
+
+def test_train_script_minimal_yaml_resolves_role_models() -> None:
+    raw = {
+        "model": {
+            "backend": "openai_compatible",
+            "openai_compatible_model": "synthetic-train-model",
+            "openai_compatible_base_url": "http://audit.invalid/v1",
+        },
+        "env": {"name": "searchqa"},
+    }
+    with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+        yaml.dump(raw, f)
+        config_path = f.name
+
+    with mock.patch("sys.argv", ["train.py", "--config", config_path]):
+        args = train_script.parse_args()
+        cfg = train_script.load_config(args)
+
+    assert cfg["optimizer_model"] == "synthetic-train-model"
+    assert cfg["target_model"] == "synthetic-train-model"
