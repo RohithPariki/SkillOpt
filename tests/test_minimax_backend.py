@@ -42,9 +42,7 @@ class _UrlopenRecorder:
         )
         return _FakeResponse(
             {
-                "choices": [
-                    {"message": {"content": self.content}, "finish_reason": "stop"}
-                ],
+                "choices": [{"message": {"content": self.content}, "finish_reason": "stop"}],
                 "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
             }
         )
@@ -65,17 +63,10 @@ def _install_openai_stub() -> None:
     sys.modules["openai"] = openai_stub
 
 
-@pytest.fixture
-def minimax_backend(monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
+@pytest.fixture()
+def minimax_backend() -> Iterator[Any]:
     _install_openai_stub()
-
-    # Isolate environment variables to avoid cross-test pollution
-    monkeypatch.setattr(os, "environ", os.environ.copy())
-    monkeypatch.delenv("TARGET_DEPLOYMENT", raising=False)
-    monkeypatch.delenv("OPTIMIZER_DEPLOYMENT", raising=False)
-
     from skillopt.model import minimax_backend as backend
-    importlib.reload(backend)
 
     snapshot = {
         "ENABLE_THINKING": backend.ENABLE_THINKING,
@@ -97,17 +88,22 @@ def _record_urlopen(monkeypatch: pytest.MonkeyPatch, backend: Any) -> _UrlopenRe
     return recorder
 
 
-def test_default_deployment_is_current_model(minimax_backend: Any) -> None:
+def test_default_deployment_is_current_model(monkeypatch: pytest.MonkeyPatch) -> None:
     from skillopt.model.common import default_model_for_backend
+    
+    _install_openai_stub()
+    monkeypatch.delenv("TARGET_DEPLOYMENT", raising=False)
+    monkeypatch.delenv("OPTIMIZER_DEPLOYMENT", raising=False)
+    
+    from skillopt.model import minimax_backend as backend
+    module = importlib.reload(backend)
 
     assert default_model_for_backend("minimax_chat") == "MiniMax-M3"
-    assert minimax_backend.TARGET_DEPLOYMENT == "MiniMax-M3"
-    assert minimax_backend.OPTIMIZER_DEPLOYMENT == "MiniMax-M3"
+    assert module.TARGET_DEPLOYMENT == "MiniMax-M3"
+    assert module.OPTIMIZER_DEPLOYMENT == "MiniMax-M3"
 
 
-def test_always_on_model_sends_adaptive_not_disabled(
-    monkeypatch: pytest.MonkeyPatch, minimax_backend: Any
-) -> None:
+def test_always_on_model_sends_adaptive_not_disabled(monkeypatch: pytest.MonkeyPatch, minimax_backend: Any) -> None:
     """M2.x cannot turn thinking off, so never claim it is disabled.
 
     MiniMax documents that the M2 family accepts ``{"type": "disabled"}`` but
@@ -125,9 +121,7 @@ def test_always_on_model_sends_adaptive_not_disabled(
     assert payload["thinking"] == {"type": "adaptive"}
 
 
-def test_adaptive_model_respects_disabled_flag(
-    monkeypatch: pytest.MonkeyPatch, minimax_backend: Any
-) -> None:
+def test_adaptive_model_respects_disabled_flag(monkeypatch: pytest.MonkeyPatch, minimax_backend: Any) -> None:
     minimax_backend.ENABLE_THINKING = False
     minimax_backend.TARGET_DEPLOYMENT = "MiniMax-M3"
     recorder = _record_urlopen(monkeypatch, minimax_backend)
@@ -139,9 +133,7 @@ def test_adaptive_model_respects_disabled_flag(
     assert payload["thinking"] == {"type": "disabled"}
 
 
-def test_adaptive_model_respects_enabled_flag(
-    monkeypatch: pytest.MonkeyPatch, minimax_backend: Any
-) -> None:
+def test_adaptive_model_respects_enabled_flag(monkeypatch: pytest.MonkeyPatch, minimax_backend: Any) -> None:
     minimax_backend.ENABLE_THINKING = True
     minimax_backend.TARGET_DEPLOYMENT = "MiniMax-M3"
     recorder = _record_urlopen(monkeypatch, minimax_backend)
@@ -151,9 +143,7 @@ def test_adaptive_model_respects_enabled_flag(
     assert recorder.calls[0]["payload"]["thinking"] == {"type": "adaptive"}
 
 
-def test_unsupported_chat_template_kwargs_is_never_sent(
-    monkeypatch: pytest.MonkeyPatch, minimax_backend: Any
-) -> None:
+def test_unsupported_chat_template_kwargs_is_never_sent(monkeypatch: pytest.MonkeyPatch, minimax_backend: Any) -> None:
     """Guards the original regression.
 
     ``chat_template_kwargs.enable_thinking`` is a Qwen/HuggingFace-serving
@@ -170,9 +160,7 @@ def test_unsupported_chat_template_kwargs_is_never_sent(
     assert "chat_template_kwargs" not in recorder.calls[0]["payload"]
 
 
-def test_unknown_deployment_defaults_to_adaptive(
-    monkeypatch: pytest.MonkeyPatch, minimax_backend: Any
-) -> None:
+def test_unknown_deployment_defaults_to_adaptive(monkeypatch: pytest.MonkeyPatch, minimax_backend: Any) -> None:
     """An unrecognized model follows the documented API default (thinking on)."""
     minimax_backend.ENABLE_THINKING = True
     minimax_backend.TARGET_DEPLOYMENT = "MiniMax-Future-9"
@@ -211,9 +199,7 @@ def test_set_optimizer_and_target_deployment(minimax_backend: Any) -> None:
     assert os.environ.get("OPTIMIZER_DEPLOYMENT") == "MiniMax-New-Optimizer"
 
 
-def test_timeout_forwarded_to_urlopen(
-    monkeypatch: pytest.MonkeyPatch, minimax_backend: Any
-) -> None:
+def test_timeout_forwarded_to_urlopen(monkeypatch: pytest.MonkeyPatch, minimax_backend: Any) -> None:
     recorder = _record_urlopen(monkeypatch, minimax_backend)
 
     minimax_backend.chat_target("system", "user", retries=1, timeout=42.5)
@@ -248,9 +234,7 @@ def test_fresh_import_optimizer_calls_without_setter(
     assert text == "answer"
     assert recorder.calls[0]["payload"]["model"] == "MiniMax-M3"
 
-    msg, usage_msg = module.chat_optimizer_messages(
-        [{"role": "user", "content": "user query"}], retries=1
-    )
+    msg, usage_msg = module.chat_optimizer_messages([{"role": "user", "content": "user query"}], retries=1)
     assert msg == "answer"
     assert recorder.calls[1]["payload"]["model"] == "MiniMax-M3"
 
@@ -268,13 +252,9 @@ def test_fresh_import_respects_optimizer_deployment_env(
     recorder = _record_urlopen(monkeypatch, module)
 
     module.chat_optimizer("system prompt", "user query", retries=1)
-    module.chat_optimizer_messages(
-        [{"role": "user", "content": "user query"}], retries=1
-    )
+    module.chat_optimizer_messages([{"role": "user", "content": "user query"}], retries=1)
     module.chat_target("system prompt", "user query", retries=1)
-    module.chat_target_messages(
-        [{"role": "user", "content": "user query"}], retries=1
-    )
+    module.chat_target_messages([{"role": "user", "content": "user query"}], retries=1)
 
     assert recorder.calls[0]["payload"]["model"] == "MiniMax-Env-Optimizer"
     assert recorder.calls[1]["payload"]["model"] == "MiniMax-Env-Optimizer"
@@ -287,7 +267,8 @@ def test_model_dispatcher_chat_optimizer_messages_minimax(
 ) -> None:
     _install_openai_stub()
     import skillopt.model as model
-    from skillopt.model import backend_config, minimax_backend as backend
+    from skillopt.model import backend_config
+    from skillopt.model import minimax_backend as backend
 
     module = importlib.reload(backend)
     recorder = _record_urlopen(monkeypatch, module)
@@ -300,9 +281,7 @@ def test_model_dispatcher_chat_optimizer_messages_minimax(
     assert recorder.calls[0]["payload"]["model"] == "MiniMax-Custom-Opt"
     assert recorder.calls[0]["timeout"] == 99
 
-    res_msg, _ = model.chat_optimizer_messages(
-        [{"role": "user", "content": "test"}], retries=1, timeout=88
-    )
+    res_msg, _ = model.chat_optimizer_messages([{"role": "user", "content": "test"}], retries=1, timeout=88)
     assert res_msg == "answer"
     assert recorder.calls[1]["payload"]["model"] == "MiniMax-Custom-Opt"
     assert recorder.calls[1]["timeout"] == 88

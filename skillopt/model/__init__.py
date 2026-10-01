@@ -242,6 +242,7 @@ def chat_target(
             retries=retries,
             stage=stage,
             reasoning_effort=reasoning_effort,
+            timeout=timeout,
         )
     if get_target_backend() == "openai_compatible":
         return _openai_compat.chat_target(
