@@ -12,6 +12,11 @@ from skillopt_sleep.__main__ import main
 from skillopt_sleep.staging import (
     SkillProposal,
     StagingError,
+    _recover_revert_transaction_locked,
+    _revert_transaction_wal,
+    _revert_wal_path,
+    _RevertTarget,
+    _write_revert_wal,
     adopt,
     adopt_skills,
     adopted_skill_names,
@@ -466,6 +471,309 @@ class TestSleepRevert(unittest.TestCase):
 
         with self.assertRaises(StagingError):
             revert_skills(staging)
+
+    def test_out_of_order_multi_night_adoptions(self):
+        """Lineage ledger tracks true adoption order across out-of-order adoptions."""
+        live_a = os.path.join(self.project, "skills", "skill_a", "SKILL.md")
+        live_b = os.path.join(self.project, "skills", "skill_b", "SKILL.md")
+        _write(live_a, "orig_a")
+        _write(live_b, "orig_b")
+
+        # Night 1 staged with skill_a
+        night1 = write_staging(
+            self.project,
+            report=SleepReport(night=1, project=self.project),
+            proposed_skill=None,
+            proposed_memory=None,
+            live_skill_path=None,
+            live_memory_path=None,
+            skill_proposals=[SkillProposal("skill_a", "prop_a", live_a)],
+            report_md="",
+        )
+
+        # Night 2 staged with skill_b
+        night2 = write_staging(
+            self.project,
+            report=SleepReport(night=2, project=self.project),
+            proposed_skill=None,
+            proposed_memory=None,
+            live_skill_path=None,
+            live_memory_path=None,
+            skill_proposals=[SkillProposal("skill_b", "prop_b", live_b)],
+            report_md="",
+        )
+
+        # Adopt night 2 first
+        adopt_skills(night2, ["skill_b"])
+        self.assertEqual(_read(live_b), "prop_b")
+        self.assertEqual(latest_adopted_staging(self.project), night2)
+
+        # Adopt night 1 second (out of chronological / night order)
+        adopt_skills(night1, ["skill_a"])
+        self.assertEqual(_read(live_a), "prop_a")
+        # Lineage ledger must identify night1 as the latest adopted staging
+        self.assertEqual(latest_adopted_staging(self.project), night1)
+
+        # Reverting night1 succeeds and points latest adopted back to night2
+        revert_skills(night1, ["skill_a"])
+        self.assertEqual(_read(live_a), "orig_a")
+        self.assertEqual(latest_adopted_staging(self.project), night2)
+
+        # Reverting night2 succeeds and leaves no adopted staging
+        revert_skills(night2, ["skill_b"])
+        self.assertEqual(_read(live_b), "orig_b")
+        self.assertIsNone(latest_adopted_staging(self.project))
+
+    def test_whole_set_prevalidation_no_partial_mutation(self):
+        """Prevalidation covers the entire set before any mutations: corruption in skill 2 leaves skill 1 untouched."""
+        live_a = os.path.join(self.project, "skills", "skill_a", "SKILL.md")
+        live_b = os.path.join(self.project, "skills", "skill_b", "SKILL.md")
+        _write(live_a, "orig_a")
+        _write(live_b, "orig_b")
+
+        staging = write_staging(
+            self.project,
+            report=SleepReport(night=1, project=self.project),
+            proposed_skill=None,
+            proposed_memory=None,
+            live_skill_path=None,
+            live_memory_path=None,
+            skill_proposals=[
+                SkillProposal("skill_a", "prop_a", live_a),
+                SkillProposal("skill_b", "prop_b", live_b),
+            ],
+            report_md="",
+        )
+        adopt_skills(staging, ["skill_a", "skill_b"])
+        self.assertEqual(_read(live_a), "prop_a")
+        self.assertEqual(_read(live_b), "prop_b")
+
+        # Corrupt skill_b's backup file
+        receipt_path = os.path.join(staging, "adopted_skills.json")
+        with open(receipt_path, "r", encoding="utf-8") as f:
+            receipts = json.load(f)
+        b_receipt = next(r for r in receipts if r["skill_name"] == "skill_b")
+        backup_b = b_receipt["backup_path"]
+        _write(backup_b, "corrupted_backup_content")
+
+        # Attempt whole-set revert
+        with self.assertRaises(StagingError) as ctx:
+            revert_skills(staging, ["skill_a", "skill_b"])
+        self.assertIn("immutable backup for previously adopted skill 'skill_b' changed", str(ctx.exception))
+
+        # Whole-set prevalidation guarantee: skill_a was NOT reverted
+        self.assertEqual(_read(live_a), "prop_a")
+        self.assertEqual(_read(live_b), "prop_b")
+
+        # skill_a's backup was NOT deleted
+        a_receipt = next(r for r in receipts if r["skill_name"] == "skill_a")
+        backup_a = a_receipt["backup_path"]
+        self.assertTrue(os.path.exists(backup_a))
+        self.assertEqual(_read(backup_a), "orig_a")
+
+        # Receipt was completely untouched
+        with open(receipt_path, "r", encoding="utf-8") as f:
+            receipts_after = json.load(f)
+        self.assertEqual(len(receipts_after), 2)
+
+    def test_authoritative_manifest_hash_mismatch_refused(self):
+        """Receipt differing from authoritative manifest sha256_after fails closed before mutation."""
+        live_a = os.path.join(self.project, "skills", "skill_a", "SKILL.md")
+        _write(live_a, "orig_a")
+
+        staging = write_staging(
+            self.project,
+            report=SleepReport(night=1, project=self.project),
+            proposed_skill=None,
+            proposed_memory=None,
+            live_skill_path=None,
+            live_memory_path=None,
+            skill_proposals=[SkillProposal("skill_a", "prop_a", live_a)],
+            report_md="",
+        )
+        adopt_skills(staging, ["skill_a"])
+
+        receipt_path = os.path.join(staging, "adopted_skills.json")
+        with open(receipt_path, "r", encoding="utf-8") as f:
+            receipts = json.load(f)
+        receipts[0]["sha256_after"] = "0" * 64
+        with open(receipt_path, "w", encoding="utf-8") as f:
+            json.dump(receipts, f)
+
+        with self.assertRaises(StagingError) as ctx:
+            revert_skills(staging, ["skill_a"])
+        self.assertIn("does not match manifest", str(ctx.exception))
+        self.assertEqual(_read(live_a), "prop_a")
+
+    def test_authoritative_manifest_created_file_unexpected_backup_refused(self):
+        """Newly created skill with tampered non-null backup_path is rejected by authoritative manifest check."""
+        live_new = os.path.join(self.project, "skills", "newbie", "SKILL.md")
+        os.makedirs(os.path.dirname(live_new), exist_ok=True)
+        self.assertFalse(os.path.exists(live_new))
+
+        staging = write_staging(
+            self.project,
+            report=SleepReport(night=1, project=self.project),
+            proposed_skill=None,
+            proposed_memory=None,
+            live_skill_path=None,
+            live_memory_path=None,
+            skill_proposals=[SkillProposal("newbie", "created_content", live_new)],
+            report_md="",
+        )
+        adopt_skills(staging, ["newbie"])
+        self.assertTrue(os.path.exists(live_new))
+
+        receipt_path = os.path.join(staging, "adopted_skills.json")
+        with open(receipt_path, "r", encoding="utf-8") as f:
+            receipts = json.load(f)
+        fake_backup = os.path.join(staging, ".backups", "skills", "newbie", "SKILL.md")
+        _write(fake_backup, "fake")
+        receipts[0]["backup_path"] = fake_backup
+        with open(receipt_path, "w", encoding="utf-8") as f:
+            json.dump(receipts, f)
+
+        with self.assertRaises(StagingError) as ctx:
+            revert_skills(staging, ["newbie"])
+        self.assertIn("has an unexpected backup", str(ctx.exception))
+        self.assertEqual(_read(live_new), "created_content")
+
+    def test_rollback_wal_backward_recovery_on_crash_before_receipt_commit(self):
+        """If revert crashed before receipt commit, WAL backward recovery restores live file and preserves backups."""
+        live_a = os.path.join(self.project, "skills", "skill_a", "SKILL.md")
+        _write(live_a, "orig_a")
+
+        staging = write_staging(
+            self.project,
+            report=SleepReport(night=1, project=self.project),
+            proposed_skill=None,
+            proposed_memory=None,
+            live_skill_path=None,
+            live_memory_path=None,
+            skill_proposals=[SkillProposal("skill_a", "prop_a", live_a)],
+            report_md="",
+        )
+        adopt_skills(staging, ["skill_a"])
+
+        receipt_path = os.path.join(staging, "adopted_skills.json")
+        with open(receipt_path, "r", encoding="utf-8") as f:
+            receipts = json.load(f)
+        backup_path = receipts[0]["backup_path"]
+
+        # Simulate crash before receipt commit:
+        # 1. Target was mutated to reverted state "orig_a"
+        _write(live_a, "orig_a")
+        # 2. Revert WAL was written
+        target = _RevertTarget(
+            key="skill_a",
+            target_key="skill:skill_a",
+            live_path=live_a,
+            expected_realpath=os.path.realpath(live_a),
+            expected_basename="SKILL.md",
+            current_sha256=_sha("prop_a"),
+            target_sha256=_sha("orig_a"),
+            proposal_bytes=b"prop_a",
+            target_bytes=b"orig_a",
+            target_mode=0o644,
+            backup_path=backup_path,
+            backup_sha256=_sha("orig_a"),
+        )
+        receipt_bytes = json.dumps(receipts, ensure_ascii=False, indent=2).encode("utf-8")
+        wal = _revert_transaction_wal(
+            kind="skills",
+            staging_dir=staging,
+            targets=[target],
+            receipt_path=receipt_path,
+            receipt_original=receipt_bytes,
+            receipt_mode=0o644,
+            receipt_file_id=(1, 1),
+            receipt_after=b"",
+        )
+        _write_revert_wal(staging, wal)
+
+        # Trigger recovery
+        errors = _recover_revert_transaction_locked(staging, wal)
+        self.assertEqual(errors, [])
+
+        # Backward recovery restored live target back to proposed state!
+        self.assertEqual(_read(live_a), "prop_a")
+        # Backup is preserved
+        self.assertTrue(os.path.exists(backup_path))
+        # WAL is removed
+        self.assertFalse(os.path.exists(_revert_wal_path(staging)))
+
+        # Revert can now cleanly succeed
+        revert_skills(staging, ["skill_a"])
+        self.assertEqual(_read(live_a), "orig_a")
+        self.assertFalse(os.path.exists(backup_path))
+
+    def test_rollback_wal_forward_recovery_on_crash_after_receipt_commit(self):
+        """If revert crashed after receipt commit, WAL forward recovery deletes backups and cleans WAL."""
+        live_a = os.path.join(self.project, "skills", "skill_a", "SKILL.md")
+        _write(live_a, "orig_a")
+
+        staging = write_staging(
+            self.project,
+            report=SleepReport(night=1, project=self.project),
+            proposed_skill=None,
+            proposed_memory=None,
+            live_skill_path=None,
+            live_memory_path=None,
+            skill_proposals=[SkillProposal("skill_a", "prop_a", live_a)],
+            report_md="",
+        )
+        adopt_skills(staging, ["skill_a"])
+
+        receipt_path = os.path.join(staging, "adopted_skills.json")
+        with open(receipt_path, "r", encoding="utf-8") as f:
+            receipts = json.load(f)
+        backup_path = receipts[0]["backup_path"]
+
+        # Simulate crash after receipt commit:
+        # Live target was reverted
+        _write(live_a, "orig_a")
+        # Receipt was committed (empty)
+        receipt_after = json.dumps([], ensure_ascii=False, indent=2).encode("utf-8")
+        _write(receipt_path, receipt_after.decode("utf-8"))
+
+        target = _RevertTarget(
+            key="skill_a",
+            target_key="skill:skill_a",
+            live_path=live_a,
+            expected_realpath=os.path.realpath(live_a),
+            expected_basename="SKILL.md",
+            current_sha256=_sha("prop_a"),
+            target_sha256=_sha("orig_a"),
+            proposal_bytes=b"prop_a",
+            target_bytes=b"orig_a",
+            target_mode=0o644,
+            backup_path=backup_path,
+            backup_sha256=_sha("orig_a"),
+        )
+        receipt_bytes = json.dumps(receipts, ensure_ascii=False, indent=2).encode("utf-8")
+        wal = _revert_transaction_wal(
+            kind="skills",
+            staging_dir=staging,
+            targets=[target],
+            receipt_path=receipt_path,
+            receipt_original=receipt_bytes,
+            receipt_mode=0o644,
+            receipt_file_id=(1, 1),
+            receipt_after=receipt_after,
+        )
+        _write_revert_wal(staging, wal)
+
+        # Backup still exists
+        self.assertTrue(os.path.exists(backup_path))
+
+        # Trigger recovery
+        errors = _recover_revert_transaction_locked(staging, wal)
+        self.assertEqual(errors, [])
+
+        # Forward recovery deleted backup and removed WAL
+        self.assertFalse(os.path.exists(backup_path))
+        self.assertFalse(os.path.exists(_revert_wal_path(staging)))
+        self.assertEqual(_read(live_a), "orig_a")
 
 
 class TestRevertCli(unittest.TestCase):
