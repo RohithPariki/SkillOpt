@@ -1,4 +1,5 @@
 """Tests for undoing an adoption: `skillopt-sleep revert`."""
+
 import hashlib
 import io
 import json
@@ -12,6 +13,8 @@ from skillopt_sleep.__main__ import main
 from skillopt_sleep.staging import (
     SkillProposal,
     StagingError,
+    _ensure_lineage_synchronized,
+    _read_lineage,
     _recover_revert_transaction_locked,
     _revert_transaction_wal,
     _revert_wal_path,
@@ -24,6 +27,7 @@ from skillopt_sleep.staging import (
     latest_adopted_staging,
     revert,
     revert_skills,
+    staging_root,
     write_staging,
 )
 from skillopt_sleep.types import SleepReport
@@ -775,6 +779,317 @@ class TestSleepRevert(unittest.TestCase):
         self.assertFalse(os.path.exists(_revert_wal_path(staging)))
         self.assertEqual(_read(live_a), "orig_a")
 
+    def test_successive_rollback_per_skill(self):
+        """Demonstrate complete successive rollback across multi-night per-skill adoptions."""
+        live_a = os.path.join(self.project, "skills", "skill_a", "SKILL.md")
+        _write(live_a, "v0_content")
+
+        # Night 1: proposes v1
+        night1 = write_staging(
+            self.project,
+            report=SleepReport(night=1, project=self.project),
+            proposed_skill=None,
+            proposed_memory=None,
+            live_skill_path=None,
+            live_memory_path=None,
+            skill_proposals=[SkillProposal("skill_a", "v1_content", live_a)],
+            report_md="",
+        )
+        adopt_skills(night1, ["skill_a"])
+        self.assertEqual(_read(live_a), "v1_content")
+
+        # Verify lineage has exactly ONE entry for night 1
+        root = staging_root(self.project)
+        entries1 = _read_lineage(root)
+        self.assertEqual(len(entries1), 1)
+        self.assertEqual(entries1[0]["action"], "adopt")
+        self.assertEqual(entries1[0]["staging_dir"], night1)
+
+        # Night 2: proposes v2
+        night2 = write_staging(
+            self.project,
+            report=SleepReport(night=2, project=self.project),
+            proposed_skill=None,
+            proposed_memory=None,
+            live_skill_path=None,
+            live_memory_path=None,
+            skill_proposals=[SkillProposal("skill_a", "v2_content", live_a)],
+            report_md="",
+        )
+        adopt_skills(night2, ["skill_a"])
+        self.assertEqual(_read(live_a), "v2_content")
+
+        # Verify lineage has exactly TWO entries total (1 for night 1, 1 for night 2)
+        entries2 = _read_lineage(root)
+        self.assertEqual(len(entries2), 2)
+        self.assertEqual(entries2[1]["action"], "adopt")
+        self.assertEqual(entries2[1]["staging_dir"], night2)
+
+        self.assertEqual(latest_adopted_staging(self.project), night2)
+
+        # Revert Night 2: live returns to v1
+        revert_skills(night2, ["skill_a"])
+        self.assertEqual(_read(live_a), "v1_content")
+
+        # Verify lineage recorded exactly one revert
+        entries3 = _read_lineage(root)
+        self.assertEqual(len(entries3), 3)
+        self.assertEqual(entries3[2]["action"], "revert")
+        self.assertEqual(entries3[2]["staging_dir"], night2)
+
+        # Latest adopted staging now points back to ancestor night 1
+        self.assertEqual(latest_adopted_staging(self.project), night1)
+
+        # Successive rollback: reverting ancestor night 1 succeeds without being blocked
+        revert_skills(night1, ["skill_a"])
+        self.assertEqual(_read(live_a), "v0_content")
+
+        # Lineage recorded ancestor revert
+        entries4 = _read_lineage(root)
+        self.assertEqual(len(entries4), 4)
+        self.assertEqual(entries4[3]["action"], "revert")
+        self.assertEqual(entries4[3]["staging_dir"], night1)
+
+        # No active adopted staging remains
+        self.assertIsNone(latest_adopted_staging(self.project))
+
+    def test_successive_rollback_legacy(self):
+        """Demonstrate complete successive rollback across multi-night legacy adoptions."""
+        live_skill = os.path.join(self.project, "SKILL.md")
+        _write(live_skill, "v0_legacy")
+
+        # Night 1: proposes v1
+        night1 = write_staging(
+            self.project,
+            report=SleepReport(night=1, project=self.project, accepted=True),
+            proposed_skill="v1_legacy",
+            proposed_memory=None,
+            live_skill_path=live_skill,
+            live_memory_path=None,
+            skill_proposals=[],
+            report_md="",
+        )
+        adopt(night1)
+        self.assertEqual(_read(live_skill), "v1_legacy")
+
+        root = staging_root(self.project)
+        entries1 = _read_lineage(root)
+        self.assertEqual(len(entries1), 1)
+        self.assertEqual(entries1[0]["action"], "adopt")
+        self.assertEqual(entries1[0]["staging_dir"], night1)
+
+        # Night 2: proposes v2
+        night2 = write_staging(
+            self.project,
+            report=SleepReport(night=2, project=self.project, accepted=True),
+            proposed_skill="v2_legacy",
+            proposed_memory=None,
+            live_skill_path=live_skill,
+            live_memory_path=None,
+            skill_proposals=[],
+            report_md="",
+        )
+        adopt(night2)
+        self.assertEqual(_read(live_skill), "v2_legacy")
+
+        entries2 = _read_lineage(root)
+        self.assertEqual(len(entries2), 2)
+        self.assertEqual(entries2[1]["action"], "adopt")
+        self.assertEqual(entries2[1]["staging_dir"], night2)
+
+        self.assertEqual(latest_adopted_staging(self.project), night2)
+
+        # Revert Night 2
+        revert(night2)
+        self.assertEqual(_read(live_skill), "v1_legacy")
+
+        entries3 = _read_lineage(root)
+        self.assertEqual(len(entries3), 3)
+        self.assertEqual(entries3[2]["action"], "revert")
+        self.assertEqual(entries3[2]["staging_dir"], night2)
+
+        self.assertEqual(latest_adopted_staging(self.project), night1)
+
+        # Successive rollback of ancestor night 1
+        revert(night1)
+        self.assertEqual(_read(live_skill), "v0_legacy")
+        self.assertIsNone(latest_adopted_staging(self.project))
+
+    def test_pre_existing_receipts_imported_once_and_revertable(self):
+        """Pre-existing receipts on disk without lineage are imported once and can be successively reverted."""
+        live_a = os.path.join(self.project, "skills", "skill_a", "SKILL.md")
+        _write(live_a, "v0")
+
+        # Night 1: write staging and adopt
+        night1 = write_staging(
+            self.project,
+            report=SleepReport(night=1, project=self.project),
+            proposed_skill=None,
+            proposed_memory=None,
+            live_skill_path=None,
+            live_memory_path=None,
+            skill_proposals=[SkillProposal("skill_a", "v1", live_a)],
+            report_md="",
+        )
+        adopt_skills(night1, ["skill_a"])
+
+        # Night 2: write staging and adopt
+        night2 = write_staging(
+            self.project,
+            report=SleepReport(night=2, project=self.project),
+            proposed_skill=None,
+            proposed_memory=None,
+            live_skill_path=None,
+            live_memory_path=None,
+            skill_proposals=[SkillProposal("skill_a", "v2", live_a)],
+            report_md="",
+        )
+        adopt_skills(night2, ["skill_a"])
+
+        # Simulate pre-existing receipts by deleting the .adoption_lineage.json file
+        root = staging_root(self.project)
+        lineage_file = os.path.join(root, ".adoption_lineage.json")
+        if os.path.exists(lineage_file):
+            os.unlink(lineage_file)
+
+        # Trigger receipt synchronization
+        entries = _ensure_lineage_synchronized(root)
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(entries[0]["staging_dir"], night1)
+        self.assertEqual(entries[1]["staging_dir"], night2)
+
+        # Run synchronization again; verify idempotent (no duplicates added)
+        entries_again = _ensure_lineage_synchronized(root)
+        self.assertEqual(len(entries_again), 2)
+
+        # Revert Night 2 succeeds
+        revert_skills(night2, ["skill_a"])
+        self.assertEqual(_read(live_a), "v1")
+
+        # Successive rollback of ancestor Night 1 succeeds
+        revert_skills(night1, ["skill_a"])
+        self.assertEqual(_read(live_a), "v0")
+        self.assertIsNone(latest_adopted_staging(self.project))
+
+    def test_existing_duplicate_lineage_entries_sanitized(self):
+        """Stale duplicate lineage entries from an older buggy state are sanitized on synchronization."""
+        live_a = os.path.join(self.project, "skills", "skill_a", "SKILL.md")
+        _write(live_a, "v0")
+
+        night1 = write_staging(
+            self.project,
+            report=SleepReport(night=1, project=self.project),
+            proposed_skill=None,
+            proposed_memory=None,
+            live_skill_path=None,
+            live_memory_path=None,
+            skill_proposals=[SkillProposal("skill_a", "v1", live_a)],
+            report_md="",
+        )
+        adopt_skills(night1, ["skill_a"])
+
+        night2 = write_staging(
+            self.project,
+            report=SleepReport(night=2, project=self.project),
+            proposed_skill=None,
+            proposed_memory=None,
+            live_skill_path=None,
+            live_memory_path=None,
+            skill_proposals=[SkillProposal("skill_a", "v2", live_a)],
+            report_md="",
+        )
+        adopt_skills(night2, ["skill_a"])
+
+        # Manually inject duplicate entries into .adoption_lineage.json to simulate old buggy state
+        root = staging_root(self.project)
+        lineage_file = os.path.join(root, ".adoption_lineage.json")
+
+        dup_entries = [
+            {"id": 1, "action": "adopt", "staging_dir": night1, "targets": ["skill:skill_a"]},
+            {"id": 2, "action": "adopt", "staging_dir": night1, "targets": ["skill:skill_a"]},
+            {"id": 3, "action": "adopt", "staging_dir": night2, "targets": ["skill:skill_a"]},
+            {"id": 4, "action": "adopt", "staging_dir": night2, "targets": ["skill:skill_a"]},
+        ]
+        with open(lineage_file, "w", encoding="utf-8") as f:
+            json.dump({"version": 1, "entries": dup_entries}, f)
+
+        # Reverting night 2 must sanitize lineage, remove duplicate, and allow subsequent ancestor revert
+        revert_skills(night2, ["skill_a"])
+        self.assertEqual(_read(live_a), "v1")
+
+        # Successive revert of ancestor night 1 succeeds!
+        revert_skills(night1, ["skill_a"])
+        self.assertEqual(_read(live_a), "v0")
+
+    def test_crash_recovery_preserves_single_lineage_entry(self):
+        """Interrupted rollback recovery updates lineage idempotently without creating duplicate revert entries."""
+        live_a = os.path.join(self.project, "skills", "skill_a", "SKILL.md")
+        _write(live_a, "orig_a")
+
+        staging = write_staging(
+            self.project,
+            report=SleepReport(night=1, project=self.project),
+            proposed_skill=None,
+            proposed_memory=None,
+            live_skill_path=None,
+            live_memory_path=None,
+            skill_proposals=[SkillProposal("skill_a", "prop_a", live_a)],
+            report_md="",
+        )
+        adopt_skills(staging, ["skill_a"])
+
+        root = staging_root(self.project)
+        self.assertEqual(len(_read_lineage(root)), 1)
+
+        receipt_path = os.path.join(staging, "adopted_skills.json")
+        with open(receipt_path, "r", encoding="utf-8") as f:
+            receipts = json.load(f)
+        backup_path = receipts[0]["backup_path"]
+
+        # Simulate crash after receipt commit:
+        _write(live_a, "orig_a")
+        receipt_after = json.dumps([], ensure_ascii=False, indent=2).encode("utf-8")
+        _write(receipt_path, receipt_after.decode("utf-8"))
+
+        target = _RevertTarget(
+            key="skill_a",
+            target_key="skill:skill_a",
+            live_path=live_a,
+            expected_realpath=os.path.realpath(live_a),
+            expected_basename="SKILL.md",
+            current_sha256=_sha("prop_a"),
+            target_sha256=_sha("orig_a"),
+            proposal_bytes=b"prop_a",
+            target_bytes=b"orig_a",
+            target_mode=0o644,
+            backup_path=backup_path,
+            backup_sha256=_sha("orig_a"),
+        )
+        receipt_bytes = json.dumps(receipts, ensure_ascii=False, indent=2).encode("utf-8")
+        wal = _revert_transaction_wal(
+            kind="skills",
+            staging_dir=staging,
+            targets=[target],
+            receipt_path=receipt_path,
+            receipt_original=receipt_bytes,
+            receipt_mode=0o644,
+            receipt_file_id=(1, 1),
+            receipt_after=receipt_after,
+        )
+        _write_revert_wal(staging, wal)
+
+        # Trigger recovery twice
+        errors1 = _recover_revert_transaction_locked(staging, wal)
+        self.assertEqual(errors1, [])
+        errors2 = _recover_revert_transaction_locked(staging, wal)
+        self.assertEqual(errors2, [])
+
+        # Lineage should have exactly 1 adopt and exactly 1 revert, no duplicates
+        entries = _read_lineage(root)
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(entries[0]["action"], "adopt")
+        self.assertEqual(entries[1]["action"], "revert")
+
 
 class TestRevertCli(unittest.TestCase):
     def setUp(self):
@@ -818,9 +1133,7 @@ class TestRevertCli(unittest.TestCase):
         self.assertIn("nothing to revert", out)
 
     def test_cli_rejects_conflicting_selection_modes(self):
-        code, out = self._run([
-            "revert", "--project", self.project, "--legacy", "--all-skills"
-        ])
+        code, out = self._run(["revert", "--project", self.project, "--legacy", "--all-skills"])
         self.assertEqual(code, 2)
         self.assertIn("exactly one of", out)
 
