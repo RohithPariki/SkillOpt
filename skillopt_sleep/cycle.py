@@ -18,7 +18,7 @@ import sys
 import time
 import unicodedata
 from dataclasses import dataclass
-from typing import List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence
 
 from skillopt_sleep import evidence
 from skillopt_sleep.backend import Backend, CursorBackendError, build_backend
@@ -28,6 +28,7 @@ from skillopt_sleep.consolidate import BUDGET_EXHAUSTED
 from skillopt_sleep.dream import dream_consolidate
 from skillopt_sleep.evidence import EvidenceLog
 from skillopt_sleep.handoff_backend import PendingCalls
+from skillopt_sleep.harvest import format_harvest_note
 from skillopt_sleep.harvest_sources import harvest_for_config
 from skillopt_sleep.memory import ensure_skill_scaffold
 from skillopt_sleep.mine import group_tasks_by_skill_hint, mine
@@ -788,13 +789,17 @@ def run_sleep_cycle(
     )
 
     # ── 1+2. harvest + mine (unless seed_tasks injected) ─────────────────
+    # The harvest cursor is per (project, source): each source reads its own
+    # store, so one shared cursor would make a source skip its sessions (#312).
+    harvest_source = cfg.get("transcript_source", "")
     digests: List[SessionDigest] = []
     if seed_tasks is not None:
         tasks = seed_tasks
         n_sessions = 0
         _progress(cfg, f"using {len(tasks)} seeded tasks")
     else:
-        since = state.last_harvest_for(project)
+        since = state.last_harvest_for(project, harvest_source)
+        harvest_stats: Dict[str, int] = {}
         # On first run (no prior harvest), apply lookback_hours so we don't
         # scan the entire transcript history and trigger massive LLM mining.
         if since is None:
@@ -816,9 +821,13 @@ def run_sleep_cycle(
             cfg,
             since_iso=since,
             limit=max_sessions,
+            stats=harvest_stats,
         )
         n_sessions = len(digests)
-        _progress(cfg, f"harvest done: sessions={n_sessions}")
+        _progress(
+            cfg,
+            f"harvest done: sessions={n_sessions}{format_harvest_note(harvest_stats)}",
+        )
         if ev is not None:
             # The transcript end of the evidentiary chain: which sessions were
             # even considered, and what signals they carried into mining.
@@ -889,7 +898,7 @@ def run_sleep_cycle(
     if not tasks:
         report.ended_at = _now_iso(clock)
         report.notes.append("no tasks mined — nothing to consolidate")
-        state.set_last_harvest(project, started)
+        state.set_last_harvest(project, started, harvest_source)
         state.record_night({"night": night, "accepted": False, "n_tasks": 0})
         if not dry_run:
             state.save()
@@ -1176,7 +1185,7 @@ def run_sleep_cycle(
                 )
         except Exception:
             pass
-        state.set_last_harvest(project, started)
+        state.set_last_harvest(project, started, harvest_source)
         night_scores = (
             {"baseline": result.baseline_score, "candidate": result.candidate_score}
             if scores_measured
