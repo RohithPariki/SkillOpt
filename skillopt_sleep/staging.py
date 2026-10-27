@@ -2306,11 +2306,22 @@ def _lineage_lock_path(staging_root_dir: str) -> str:
     return os.path.join(staging_root_dir, _LINEAGE_LOCK_FILENAME)
 
 
+_HELD_LINEAGE_LOCKS: set[str] = set()
+
+
 @contextmanager
 def _lineage_lock(staging_root_dir: str):
     lock_path = _lineage_lock_path(staging_root_dir)
-    with _exclusive_create_locks([lock_path]):
+    lock_key = os.path.normcase(os.path.abspath(lock_path))
+    if lock_key in _HELD_LINEAGE_LOCKS:
         yield
+        return
+    _HELD_LINEAGE_LOCKS.add(lock_key)
+    try:
+        with _exclusive_create_locks([lock_path]):
+            yield
+    finally:
+        _HELD_LINEAGE_LOCKS.discard(lock_key)
 
 
 def _read_lineage(staging_root_dir: str) -> List[Dict[str, Any]]:
@@ -2437,10 +2448,114 @@ def _sanitize_lineage_entries(entries: List[Dict[str, Any]]) -> tuple[List[Dict[
     return sanitized, modified
 
 
+def _reconstruct_pre_existing_adoptions_order(
+    candidates: List[Dict[str, Any]],
+    active_per_target: Dict[str, List[str]],
+) -> List[Dict[str, Any]]:
+    """Determine a trustworthy chronological order for pre-existing adoption receipts.
+
+    Uses per-target SHA transition chains (before -> after) to establish causal
+    dependencies, verified against receipt modification times.
+    Explicitly refuses ambiguous migrations by raising StagingError.
+    """
+    if len(candidates) <= 1:
+        return candidates
+
+    all_targets: set[str] = set()
+    for c in candidates:
+        all_targets.update(c["targets"])
+
+    adj: Dict[int, set[int]] = {}
+    in_degree: Dict[int, int] = {id(c): 0 for c in candidates}
+    candidate_by_id = {id(c): c for c in candidates}
+
+    for t in all_targets:
+        target_items = [c for c in candidates if t in c["targets"]]
+        if len(target_items) <= 1:
+            continue
+
+        before_map: Dict[str, Dict[str, Any]] = {}
+        after_map: Dict[str, Dict[str, Any]] = {}
+        for item in target_items:
+            trans = item["transitions"][t]
+            b_sha = trans["before"]
+            a_sha = trans["after"]
+            if b_sha in before_map:
+                raise StagingError(
+                    f"ambiguous pre-existing adoption order for {t}: "
+                    f"multiple adoptions branch from the same baseline ({b_sha[:8] if b_sha else 'initial'})"
+                )
+            if a_sha in after_map:
+                raise StagingError(
+                    f"ambiguous pre-existing adoption order for {t}: "
+                    f"multiple adoptions produce the same target hash ({a_sha[:8]})"
+                )
+            before_map[b_sha] = item
+            after_map[a_sha] = item
+
+        roots = [item for item in target_items if item["transitions"][t]["before"] not in after_map]
+        if len(roots) != 1:
+            raise StagingError(
+                f"ambiguous pre-existing adoption order for {t}: "
+                f"transition chain is broken, disconnected, or cyclical"
+            )
+
+        chain = [roots[0]]
+        visited = {id(roots[0])}
+        while len(chain) < len(target_items):
+            curr_after = chain[-1]["transitions"][t]["after"]
+            next_item = before_map.get(curr_after)
+            if next_item is None or id(next_item) in visited:
+                raise StagingError(
+                    f"ambiguous pre-existing adoption order for {t}: "
+                    f"cannot form a contiguous linear transition chain"
+                )
+            chain.append(next_item)
+            visited.add(id(next_item))
+
+        for idx in range(len(chain) - 1):
+            if chain[idx]["receipt_mtime_ns"] > chain[idx + 1]["receipt_mtime_ns"] + 1_000_000_000:
+                raise StagingError(
+                    f"ambiguous pre-existing adoption order for {t}: "
+                    f"receipt timestamps contradict causal adoption chain"
+                )
+
+        for idx in range(len(chain) - 1):
+            u_id = id(chain[idx])
+            v_id = id(chain[idx + 1])
+            if v_id not in adj.setdefault(u_id, set()):
+                adj[u_id].add(v_id)
+                in_degree[v_id] += 1
+
+    ordered: List[Dict[str, Any]] = []
+    ready = [id(c) for c in candidates if in_degree[id(c)] == 0]
+
+    while ready:
+        ready.sort(
+            key=lambda cid: (
+                candidate_by_id[cid]["receipt_mtime_ns"],
+                _path_identity_key(candidate_by_id[cid]["staging_dir"]),
+            )
+        )
+        curr_id = ready.pop(0)
+        ordered.append(candidate_by_id[curr_id])
+
+        for neighbor_id in adj.get(curr_id, ()):
+            in_degree[neighbor_id] -= 1
+            if in_degree[neighbor_id] == 0:
+                ready.append(neighbor_id)
+
+    if len(ordered) != len(candidates):
+        raise StagingError("ambiguous pre-existing adoption order: circular dependency among receipts")
+
+    return ordered
+
+
 def _ensure_lineage_synchronized(
     staging_root_dir: str,
     *,
     pending_adoption: Optional[tuple[str, Sequence[str]]] = None,
+    pending_revert: Optional[tuple[str, Sequence[str]]] = None,
 ) -> List[Dict[str, Any]]:
     raw_entries = _read_lineage(staging_root_dir)
     entries, needs_update = _sanitize_lineage_entries(raw_entries)
@@ -2462,6 +2577,13 @@ def _ensure_lineage_synchronized(
         pending_sdir_key = _path_identity_key(pending_sdir)
         pending_targets_set = set(p_targets)
 
+    pending_revert_sdir_key = None
+    pending_revert_targets_set = set()
+    if pending_revert:
+        p_rev_sdir, p_rev_targets = pending_revert
+        pending_revert_sdir_key = _path_identity_key(p_rev_sdir)
+        pending_revert_targets_set = set(p_rev_targets)
+
     if os.path.isdir(staging_root_dir) and not _is_link_or_junction(staging_root_dir):
         subs = []
         for entry in os.listdir(staging_root_dir):
@@ -2474,8 +2596,88 @@ def _ensure_lineage_synchronized(
             if _is_link_or_junction(manifest_path) or not os.path.isfile(manifest_path):
                 continue
             subs.append(path)
-        subs.sort(key=_staging_order)
 
+        # 1. Recover any unrecovered revert WALs in staging directories
+        for sdir in subs:
+            if pending_revert_sdir_key and _path_identity_key(sdir) == pending_revert_sdir_key:
+                continue
+            revert_wal = _read_revert_wal(sdir)
+            if revert_wal is not None:
+                rec_errors = _recover_revert_transaction_locked(sdir, revert_wal)
+                if rec_errors:
+                    raise StagingRecoveryError(
+                        f"cannot recover an interrupted rollback in {os.path.basename(sdir)}; journal retained",
+                        recovery_errors=rec_errors,
+                    )
+                raw_entries = _read_lineage(staging_root_dir)
+                entries, _ = _sanitize_lineage_entries(raw_entries)
+                active_per_target = _active_targets_from_lineage(entries)
+                for entry in entries:
+                    if entry.get("action") == "adopt":
+                        sd = entry.get("staging_dir")
+                        if sd:
+                            sk = _path_identity_key(sd)
+                            for t in entry.get("targets", []):
+                                recorded_adoptions.add((sk, t))
+
+        # 2. Reconcile receipt deletions: if a target was reverted on disk in sdir's receipt
+        # but lineage still has sdir as active, synthesize a revert entry.
+        for t, stack in list(active_per_target.items()):
+            for sdir in list(stack):
+                sdir_key = _path_identity_key(sdir)
+                if sdir_key == pending_sdir_key:
+                    continue
+                if pending_revert_sdir_key and sdir_key == pending_revert_sdir_key and t in pending_revert_targets_set:
+                    continue
+                if t.startswith("skill:"):
+                    skill_name = t[6:]
+                    s_receipt = os.path.join(sdir, "adopted_skills.json")
+                    has_skill = False
+                    if os.path.isfile(s_receipt) and not _is_link_or_junction(s_receipt):
+                        try:
+                            rows, _, _, _ = _read_existing_receipts(s_receipt, sdir)
+                            has_skill = any(r["skill_name"] == skill_name for r in rows)
+                        except Exception:
+                            has_skill = True
+                    if not has_skill:
+                        entries.append({
+                            "id": len(entries) + 1,
+                            "action": "revert",
+                            "timestamp": os.path.getmtime(s_receipt) if os.path.exists(s_receipt) else time.time(),
+                            "staging_dir": sdir,
+                            "staging_name": os.path.basename(sdir),
+                            "kind": "skills",
+                            "targets": [t],
+                        })
+                        needs_update = True
+                elif t.startswith("legacy:"):
+                    label = t[7:]
+                    l_receipt = os.path.join(sdir, "adopted_legacy.json")
+                    has_legacy = False
+                    if os.path.isfile(l_receipt) and not _is_link_or_junction(l_receipt):
+                        try:
+                            l_rows, _, _, _ = _read_legacy_receipts(l_receipt, sdir)
+                            has_legacy = any(r["target"] == label for r in l_rows)
+                        except Exception:
+                            has_legacy = True
+                    if not has_legacy:
+                        entries.append({
+                            "id": len(entries) + 1,
+                            "action": "revert",
+                            "timestamp": os.path.getmtime(l_receipt) if os.path.exists(l_receipt) else time.time(),
+                            "staging_dir": sdir,
+                            "staging_name": os.path.basename(sdir),
+                            "kind": "legacy",
+                            "targets": [t],
+                        })
+                        needs_update = True
+
+        if needs_update:
+            entries, _ = _sanitize_lineage_entries(entries)
+            active_per_target = _active_targets_from_lineage(entries)
+
+        # 3. Gather pre-existing unrecorded receipts across all staging dirs
+        candidates: List[Dict[str, Any]] = []
         for sdir in subs:
             sdir_key = _path_identity_key(sdir)
             s_receipt = os.path.join(sdir, "adopted_skills.json")
@@ -2483,27 +2685,32 @@ def _ensure_lineage_synchronized(
                 try:
                     rows, _, _, _ = _read_existing_receipts(s_receipt, sdir)
                     unrecorded_skills = []
+                    transitions = {}
                     for r in rows:
                         tkey = f"skill:{r['skill_name']}"
                         if sdir_key == pending_sdir_key and tkey in pending_targets_set:
                             continue
                         if (sdir_key, tkey) not in recorded_adoptions:
                             unrecorded_skills.append(tkey)
-                            recorded_adoptions.add((sdir_key, tkey))
-                            active_per_target.setdefault(tkey, []).append(sdir)
-                    if unrecorded_skills:
-                        entries.append(
-                            {
-                                "id": len(entries) + 1,
-                                "action": "adopt",
-                                "timestamp": os.path.getmtime(s_receipt),
-                                "staging_dir": sdir,
-                                "staging_name": os.path.basename(sdir),
-                                "kind": "skills",
-                                "targets": unrecorded_skills,
+                            transitions[tkey] = {
+                                "before": r["sha256_before"],
+                                "after": r["sha256_after"],
+                                "live_path": r["live_skill_path"],
                             }
-                        )
-                        needs_update = True
+                    if unrecorded_skills:
+                        info = os.stat(s_receipt, follow_symlinks=False)
+                        candidates.append({
+                            "staging_dir": sdir,
+                            "staging_name": os.path.basename(sdir),
+                            "kind": "skills",
+                            "receipt_path": s_receipt,
+                            "receipt_mtime_ns": info.st_mtime_ns,
+                            "timestamp": info.st_mtime,
+                            "targets": unrecorded_skills,
+                            "transitions": transitions,
+                        })
+                except StagingError:
+                    raise
                 except Exception:
                     pass
 
@@ -2512,29 +2719,53 @@ def _ensure_lineage_synchronized(
                 try:
                     l_rows, _, _, _ = _read_legacy_receipts(l_receipt, sdir)
                     unrecorded_legacy = []
+                    l_transitions = {}
                     for r in l_rows:
                         tkey = f"legacy:{r['target']}"
                         if sdir_key == pending_sdir_key and tkey in pending_targets_set:
                             continue
                         if (sdir_key, tkey) not in recorded_adoptions:
                             unrecorded_legacy.append(tkey)
-                            recorded_adoptions.add((sdir_key, tkey))
-                            active_per_target.setdefault(tkey, []).append(sdir)
-                    if unrecorded_legacy:
-                        entries.append(
-                            {
-                                "id": len(entries) + 1,
-                                "action": "adopt",
-                                "timestamp": os.path.getmtime(l_receipt),
-                                "staging_dir": sdir,
-                                "staging_name": os.path.basename(sdir),
-                                "kind": "legacy",
-                                "targets": unrecorded_legacy,
+                            l_transitions[tkey] = {
+                                "before": r["sha256_before"],
+                                "after": r["sha256_after"],
+                                "live_path": r["live_path"],
                             }
-                        )
-                        needs_update = True
+                    if unrecorded_legacy:
+                        info = os.stat(l_receipt, follow_symlinks=False)
+                        candidates.append({
+                            "staging_dir": sdir,
+                            "staging_name": os.path.basename(sdir),
+                            "kind": "legacy",
+                            "receipt_path": l_receipt,
+                            "receipt_mtime_ns": info.st_mtime_ns,
+                            "timestamp": info.st_mtime,
+                            "targets": unrecorded_legacy,
+                            "transitions": l_transitions,
+                        })
+                except StagingError:
+                    raise
                 except Exception:
                     pass
+
+        # 4. Order candidates trustworthily using causal SHA chains and timestamps
+        if candidates:
+            ordered_candidates = _reconstruct_pre_existing_adoptions_order(candidates, active_per_target)
+            for item in ordered_candidates:
+                entries.append({
+                    "id": len(entries) + 1,
+                    "action": "adopt",
+                    "timestamp": item["timestamp"],
+                    "staging_dir": item["staging_dir"],
+                    "staging_name": item["staging_name"],
+                    "kind": item["kind"],
+                    "targets": item["targets"],
+                })
+                sdir_key = _path_identity_key(item["staging_dir"])
+                for t in item["targets"]:
+                    recorded_adoptions.add((sdir_key, t))
+                    active_per_target.setdefault(t, []).append(item["staging_dir"])
+            needs_update = True
 
     if needs_update or (not os.path.exists(_lineage_path(staging_root_dir)) and entries):
         _write_lineage(staging_root_dir, entries)
@@ -2583,7 +2814,7 @@ def _record_revert_in_lineage(staging_dir: str, *, kind: str, target_keys: Seque
     if not os.path.isdir(staging_root_dir) or _is_link_or_junction(staging_root_dir):
         return
     with _lineage_lock(staging_root_dir):
-        entries = _ensure_lineage_synchronized(staging_root_dir)
+        entries = _ensure_lineage_synchronized(staging_root_dir, pending_revert=(staging_dir, target_keys))
         active_per_target = _active_targets_from_lineage(entries)
         sdir_key = _path_identity_key(staging_dir)
 
@@ -3027,14 +3258,11 @@ def _execute_revert_transaction_locked(
                 _unlink_fsync(target.backup_path)
                 _clean_empty_backup_dir(os.path.dirname(target.backup_path), staging_dir)
 
-        try:
-            _record_revert_in_lineage(
-                staging_dir,
-                kind=kind,
-                target_keys=[target.target_key for target in targets],
-            )
-        except Exception:
-            pass
+        _record_revert_in_lineage(
+            staging_dir,
+            kind=kind,
+            target_keys=[target.target_key for target in targets],
+        )
 
         _remove_revert_wal(staging_dir)
 
@@ -3051,6 +3279,10 @@ def _execute_revert_transaction_locked(
                 primary=primary,
                 recovery_errors=recovery_errors,
             ) from primary
+        if not os.path.lexists(_revert_wal_path(staging_dir)):
+            current_r, _, _ = _file_snapshot(receipt_path)
+            if _bytes_sha256(current_r) == wal.get("receipt", {}).get("proposed_sha256"):
+                return
         raise
 
 
@@ -3084,8 +3316,9 @@ def _recover_revert_transaction_locked(staging_dir: str, wal: Dict[str, Any]) ->
                     kind=wal.get("kind") or "skills",
                     target_keys=[target.target_key for target in targets],
                 )
-            except Exception:
-                pass
+            except BaseException as exc:
+                errors.append(f"lineage update {staging_dir}: {type(exc).__name__}: {exc}")
+        if not errors:
             try:
                 _remove_revert_wal(staging_dir)
             except BaseException as exc:

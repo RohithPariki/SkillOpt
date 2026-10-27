@@ -8,12 +8,15 @@ import shutil
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from unittest.mock import patch
 
 from skillopt_sleep.__main__ import main
 from skillopt_sleep.staging import (
     SkillProposal,
     StagingError,
+    StagingRecoveryError,
     _ensure_lineage_synchronized,
+    _lineage_path,
     _read_lineage,
     _recover_revert_transaction_locked,
     _revert_transaction_wal,
@@ -1089,6 +1092,270 @@ class TestSleepRevert(unittest.TestCase):
         self.assertEqual(len(entries), 2)
         self.assertEqual(entries[0]["action"], "adopt")
         self.assertEqual(entries[1]["action"], "revert")
+
+    def test_rollback_lineage_failure_retains_wal_and_retry_unwinds_ancestor_per_skill(self):
+        live_a = os.path.join(self.project, "skills", "skill_a", "SKILL.md")
+        _write(live_a, "v1_content")
+
+        staging1 = write_staging(
+            self.project,
+            report=SleepReport(night=1, project=self.project),
+            proposed_skill=None,
+            proposed_memory=None,
+            live_skill_path=None,
+            live_memory_path=None,
+            skill_proposals=[SkillProposal("skill_a", "v2_content", live_a)],
+            report_md="",
+        )
+        adopt_skills(staging1, ["skill_a"])
+        self.assertEqual(_read(live_a), "v2_content")
+
+        staging2 = write_staging(
+            self.project,
+            report=SleepReport(night=2, project=self.project),
+            proposed_skill=None,
+            proposed_memory=None,
+            live_skill_path=None,
+            live_memory_path=None,
+            skill_proposals=[SkillProposal("skill_a", "v3_content", live_a)],
+            report_md="",
+        )
+        adopt_skills(staging2, ["skill_a"])
+        self.assertEqual(_read(live_a), "v3_content")
+
+        wal_path = _revert_wal_path(staging2)
+        with patch("skillopt_sleep.staging._write_lineage", side_effect=OSError("lineage disk failure")):
+            with self.assertRaises(StagingRecoveryError) as ctx:
+                revert_skills(staging2, ["skill_a"])
+            self.assertIn("journal retained", str(ctx.exception))
+
+        self.assertTrue(os.path.exists(wal_path))
+
+        # Ancestor unwind: attempting to revert night 1 recovers the journal and unwinds to v1
+        reverted1 = revert_skills(staging1, ["skill_a"])
+        self.assertEqual(len(reverted1), 1)
+        self.assertEqual(_read(live_a), "v1_content")
+        self.assertFalse(os.path.exists(wal_path))
+
+    def test_rollback_lineage_failure_retains_wal_and_retry_unwinds_ancestor_legacy(self):
+        live = os.path.join(self.project, "SKILL.md")
+        _write(live, "v1_content")
+
+        staging1 = write_staging(
+            self.project,
+            report=SleepReport(night=1, project=self.project, accepted=True),
+            proposed_skill="v2_content",
+            proposed_memory=None,
+            live_skill_path=live,
+            live_memory_path=None,
+            skill_proposals=[],
+            report_md="",
+        )
+        adopt(staging1)
+        self.assertEqual(_read(live), "v2_content")
+
+        staging2 = write_staging(
+            self.project,
+            report=SleepReport(night=2, project=self.project, accepted=True),
+            proposed_skill="v3_content",
+            proposed_memory=None,
+            live_skill_path=live,
+            live_memory_path=None,
+            skill_proposals=[],
+            report_md="",
+        )
+        adopt(staging2)
+        self.assertEqual(_read(live), "v3_content")
+
+        wal_path = _revert_wal_path(staging2)
+        with patch("skillopt_sleep.staging._write_lineage", side_effect=OSError("lineage disk failure")):
+            with self.assertRaises(StagingRecoveryError) as ctx:
+                revert(staging2)
+            self.assertIn("journal retained", str(ctx.exception))
+
+        self.assertTrue(os.path.exists(wal_path))
+
+        reverted1 = revert(staging1)
+        self.assertEqual(len(reverted1), 1)
+        self.assertEqual(_read(live), "v1_content")
+        self.assertFalse(os.path.exists(wal_path))
+
+    def test_pre_existing_receipts_trustworthy_order_and_refusal_per_skill(self):
+        root = staging_root(self.project)
+        live_a = os.path.join(self.project, "skills", "skill_a", "SKILL.md")
+        _write(live_a, "v1_content")
+
+        sdir_older = os.path.join(root, "20261026-100000")
+        sdir_newer = os.path.join(root, "20261026-200000")
+
+        # sdir_newer was adopted FIRST (v1 -> v2)
+        write_staging(
+            self.project,
+            report=SleepReport(night=1, project=self.project),
+            proposed_skill=None,
+            proposed_memory=None,
+            live_skill_path=None,
+            live_memory_path=None,
+            skill_proposals=[SkillProposal("skill_a", "v2_content", live_a)],
+            report_md="",
+            out_dir=sdir_newer,
+        )
+        adopt_skills(sdir_newer, ["skill_a"])
+        self.assertEqual(_read(live_a), "v2_content")
+
+        # sdir_older was adopted SECOND (v2 -> v3)
+        write_staging(
+            self.project,
+            report=SleepReport(night=2, project=self.project),
+            proposed_skill=None,
+            proposed_memory=None,
+            live_skill_path=None,
+            live_memory_path=None,
+            skill_proposals=[SkillProposal("skill_a", "v3_content", live_a)],
+            report_md="",
+            out_dir=sdir_older,
+        )
+        adopt_skills(sdir_older, ["skill_a"])
+        self.assertEqual(_read(live_a), "v3_content")
+
+        lineage_file = _lineage_path(root)
+        if os.path.exists(lineage_file):
+            os.unlink(lineage_file)
+
+        # Trustworthy ordering: Causal chain must identify sdir_older as head
+        self.assertEqual(latest_adopted_staging(self.project), sdir_older)
+
+        reverted_older = revert_skills(sdir_older, ["skill_a"])
+        self.assertEqual(len(reverted_older), 1)
+        self.assertEqual(_read(live_a), "v2_content")
+
+        reverted_newer = revert_skills(sdir_newer, ["skill_a"])
+        self.assertEqual(len(reverted_newer), 1)
+        self.assertEqual(_read(live_a), "v1_content")
+
+        # Refusal test: conflicting receipts branching from the same baseline
+        fork_a = os.path.join(root, "20261026-300000")
+        fork_b = os.path.join(root, "20261026-400000")
+        write_staging(
+            self.project,
+            report=SleepReport(night=3, project=self.project),
+            proposed_skill=None,
+            proposed_memory=None,
+            live_skill_path=None,
+            live_memory_path=None,
+            skill_proposals=[SkillProposal("skill_a", "fork_a_content", live_a)],
+            report_md="",
+            out_dir=fork_a,
+        )
+        adopt_skills(fork_a, ["skill_a"])
+        _write(live_a, "v1_content")
+        write_staging(
+            self.project,
+            report=SleepReport(night=4, project=self.project),
+            proposed_skill=None,
+            proposed_memory=None,
+            live_skill_path=None,
+            live_memory_path=None,
+            skill_proposals=[SkillProposal("skill_a", "fork_b_content", live_a)],
+            report_md="",
+            out_dir=fork_b,
+        )
+        adopt_skills(fork_b, ["skill_a"])
+
+        if os.path.exists(lineage_file):
+            os.unlink(lineage_file)
+
+        with self.assertRaises(StagingError) as ctx:
+            _ensure_lineage_synchronized(root)
+        self.assertIn("ambiguous pre-existing adoption order", str(ctx.exception))
+
+    def test_pre_existing_receipts_trustworthy_order_and_refusal_legacy(self):
+        root = staging_root(self.project)
+        live = os.path.join(self.project, "SKILL.md")
+        _write(live, "v1_content")
+
+        sdir_older = os.path.join(root, "20261026-100000")
+        sdir_newer = os.path.join(root, "20261026-200000")
+
+        # sdir_newer adopted FIRST (v1 -> v2)
+        write_staging(
+            self.project,
+            report=SleepReport(night=1, project=self.project, accepted=True),
+            proposed_skill="v2_content",
+            proposed_memory=None,
+            live_skill_path=live,
+            live_memory_path=None,
+            skill_proposals=[],
+            report_md="",
+            out_dir=sdir_newer,
+        )
+        adopt(sdir_newer)
+        self.assertEqual(_read(live), "v2_content")
+
+        # sdir_older adopted SECOND (v2 -> v3)
+        write_staging(
+            self.project,
+            report=SleepReport(night=2, project=self.project, accepted=True),
+            proposed_skill="v3_content",
+            proposed_memory=None,
+            live_skill_path=live,
+            live_memory_path=None,
+            skill_proposals=[],
+            report_md="",
+            out_dir=sdir_older,
+        )
+        adopt(sdir_older)
+        self.assertEqual(_read(live), "v3_content")
+
+        lineage_file = _lineage_path(root)
+        if os.path.exists(lineage_file):
+            os.unlink(lineage_file)
+
+        self.assertEqual(latest_adopted_staging(self.project), sdir_older)
+
+        reverted_older = revert(sdir_older)
+        self.assertEqual(len(reverted_older), 1)
+        self.assertEqual(_read(live), "v2_content")
+
+        reverted_newer = revert(sdir_newer)
+        self.assertEqual(len(reverted_newer), 1)
+        self.assertEqual(_read(live), "v1_content")
+
+        # Refusal test: conflicting receipts branching from same baseline
+        fork_a = os.path.join(root, "20261026-300000")
+        fork_b = os.path.join(root, "20261026-400000")
+        write_staging(
+            self.project,
+            report=SleepReport(night=3, project=self.project, accepted=True),
+            proposed_skill="fork_a_content",
+            proposed_memory=None,
+            live_skill_path=live,
+            live_memory_path=None,
+            skill_proposals=[],
+            report_md="",
+            out_dir=fork_a,
+        )
+        adopt(fork_a)
+        _write(live, "v1_content")
+        write_staging(
+            self.project,
+            report=SleepReport(night=4, project=self.project, accepted=True),
+            proposed_skill="fork_b_content",
+            proposed_memory=None,
+            live_skill_path=live,
+            live_memory_path=None,
+            skill_proposals=[],
+            report_md="",
+            out_dir=fork_b,
+        )
+        adopt(fork_b)
+
+        if os.path.exists(lineage_file):
+            os.unlink(lineage_file)
+
+        with self.assertRaises(StagingError) as ctx:
+            _ensure_lineage_synchronized(root)
+        self.assertIn("ambiguous pre-existing adoption order", str(ctx.exception))
 
 
 class TestRevertCli(unittest.TestCase):
